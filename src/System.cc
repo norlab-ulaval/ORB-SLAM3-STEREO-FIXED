@@ -1383,6 +1383,11 @@ float System::GetImageScale()
     return mpTracker->GetImageScale();
 }
 
+Atlas* System::GetAtlas() {
+    return mpAtlas;
+}
+
+
 #ifdef REGISTER_TIMES
 void System::InsertRectTime(double& time)
 {
@@ -1408,7 +1413,12 @@ void System::SaveAtlas(int type){
         // Save the current session
         mpAtlas->PreSave();
 
-        string pathSaveFileName = "./";
+        // see https://github.com/UZ-SLAMLab/ORB_SLAM3/issues/882#issuecomment-3341706147
+        string pathSaveFileName = "";
+        // if user specifies an absolute path, don't do anything silly
+        if (mStrSaveAtlasToFile[0] != '/') {
+            pathSaveFileName = "./";
+        }
         pathSaveFileName = pathSaveFileName.append(mStrSaveAtlasToFile);
         pathSaveFileName = pathSaveFileName.append(".osa");
 
@@ -1546,4 +1556,3 @@ string System::CalculateCheckSum(string filename, int type)
 }
 
 } //namespace ORB_SLAM
-

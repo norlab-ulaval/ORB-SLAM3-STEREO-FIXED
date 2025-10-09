@@ -185,6 +185,7 @@ public:
     void ChangeDataset();
 
     float GetImageScale();
+    Atlas* GetAtlas();
 
 #ifdef REGISTER_TIMES
     void InsertRectTime(double& time);
