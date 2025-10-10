@@ -98,6 +98,9 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         }
     }
 
+    cout << "Atlas Load File: " << mStrLoadAtlasFromFile << endl;
+    cout << "Atlas Save File: " << mStrSaveAtlasToFile << endl;
+
     node = fsSettings["loopClosing"];
     bool activeLC = true;
     if(!node.empty())
@@ -547,6 +550,7 @@ void System::Shutdown()
 
     if(!mStrSaveAtlasToFile.empty())
     {
+        cout << "Atlas saving to file " << mStrSaveAtlasToFile << endl;
         Verbose::PrintMess("Atlas saving to file " + mStrSaveAtlasToFile, Verbose::VERBOSITY_NORMAL);
         SaveAtlas(FileType::BINARY_FILE);
     }
@@ -1406,19 +1410,23 @@ void System::InsertTrackTime(double& time)
 #endif
 
 void System::SaveAtlas(int type){
+    cout << "Should save output atlas file to " << mStrSaveAtlasToFile << endl;
     if(!mStrSaveAtlasToFile.empty())
     {
+        cout << "Inside " << endl;
         //clock_t start = clock();
 
         // Save the current session
         mpAtlas->PreSave();
 
+        cout << "1 " << endl;
         // see https://github.com/UZ-SLAMLab/ORB_SLAM3/issues/882#issuecomment-3341706147
         string pathSaveFileName = "";
         // if user specifies an absolute path, don't do anything silly
         if (mStrSaveAtlasToFile[0] != '/') {
             pathSaveFileName = "./";
         }
+        cout << "2 " << endl;
         pathSaveFileName = pathSaveFileName.append(mStrSaveAtlasToFile);
         pathSaveFileName = pathSaveFileName.append(".osa");
 
@@ -1428,6 +1436,7 @@ void System::SaveAtlas(int type){
         std::size_t found = mStrVocabularyFilePath.find_last_of("/\\");
         string strVocabularyName = mStrVocabularyFilePath.substr(found+1);
 
+        cout << "3 " << endl;
         if(type == TEXT_FILE) // File text
         {
             cout << "Starting to write the save text file " << endl;
@@ -1451,6 +1460,7 @@ void System::SaveAtlas(int type){
             oa << mpAtlas;
             cout << "End to write save binary file" << endl;
         }
+        cout << "4 " << endl;
     }
 }
 
