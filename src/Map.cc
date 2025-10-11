@@ -358,8 +358,6 @@ void Map::SetLastMapChange(int currentChangeId)
 
 void Map::PreSave(std::set<GeometricCamera*> &spCams)
 {
-    std::cout << "PreSave map 1 " << std::endl;
-
     // Create copies of the containers with minimal mutex locking
     set<MapPoint*> sMapPoints;
     vector<KeyFrame*> vKeyFrameOrigins;
@@ -376,18 +374,10 @@ void Map::PreSave(std::set<GeometricCamera*> &spCams)
         pKFlowerIDCopy = mpKFlowerID;
     }
 
-    std::cout << "PreSave map 1.5 - copied " << sMapPoints.size() << " map points" << std::endl;
-
     // Process MapPoints without holding the main mutex
     int nMPWithoutObs = 0;
-    int ctr = 0;
     for(MapPoint* pMPi : sMapPoints)
     {
-        if(ctr % 1000 == 0)
-        {
-            std::cout <<"Presave inside loop " << ctr << std::endl;
-        }
-        ctr++;
 
         if(!pMPi || pMPi->isBad())
             continue;
@@ -412,7 +402,6 @@ void Map::PreSave(std::set<GeometricCamera*> &spCams)
             }
         }
     }
-    std::cout << "PreSave map 2 " << std::endl;
 
     // Backup operations with mutex protection
     {
@@ -428,7 +417,6 @@ void Map::PreSave(std::set<GeometricCamera*> &spCams)
                 mvBackupKeyFrameOriginsId.push_back(pKF->mnId);
             }
         }
-        std::cout << "PreSave map 3 " << std::endl;
 
         // Backup of MapPoints
         mvpBackupMapPoints.clear();
@@ -439,8 +427,6 @@ void Map::PreSave(std::set<GeometricCamera*> &spCams)
 
             mvpBackupMapPoints.push_back(pMPi);
         }
-
-        std::cout << "PreSave map 3.5 - starting MapPoint PreSave calls" << std::endl;
     }
 
     // Call MapPoint PreSave methods without holding main mutex
@@ -451,7 +437,6 @@ void Map::PreSave(std::set<GeometricCamera*> &spCams)
 
     {
         unique_lock<mutex> lock(mMutexMap);
-        std::cout << "PreSave map 4 " << std::endl;
 
         // Backup of KeyFrames
         mvpBackupKeyFrames.clear();
@@ -462,8 +447,6 @@ void Map::PreSave(std::set<GeometricCamera*> &spCams)
 
             mvpBackupKeyFrames.push_back(pKFi);
         }
-
-        std::cout << "PreSave map 4.5 - starting KeyFrame PreSave calls" << std::endl;
     }
 
     // Call KeyFrame PreSave methods without holding main mutex
@@ -474,20 +457,17 @@ void Map::PreSave(std::set<GeometricCamera*> &spCams)
 
     {
         unique_lock<mutex> lock(mMutexMap);
-        std::cout << "PreSave map 5 " << std::endl;
         mnBackupKFinitialID = -1;
         if(pKFinitialCopy)
         {
             mnBackupKFinitialID = pKFinitialCopy->mnId;
         }
 
-        std::cout << "PreSave map 6 " << std::endl;
         mnBackupKFlowerID = -1;
         if(pKFlowerIDCopy)
         {
             mnBackupKFlowerID = pKFlowerIDCopy->mnId;
         }
-        std::cout << "PreSave map 7 " << std::endl;
     }
 }
 

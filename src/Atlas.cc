@@ -301,12 +301,10 @@ bool Atlas::isImuInitialized()
 
 void Atlas::PreSave()
 {
-    std::cout << "PreSave" << std::endl;
     if(mpCurrentMap){
         if(!mspMaps.empty() && mnLastInitKFidMap < mpCurrentMap->GetMaxKFid())
             mnLastInitKFidMap = mpCurrentMap->GetMaxKFid()+1; //The init KF is the next of current maximum
     }
-    std::cout << "PreSave2" << std::endl;
 
     struct compFunctor
     {
@@ -315,17 +313,13 @@ void Atlas::PreSave()
             return elem1->GetId() < elem2->GetId();
         }
     };
-    std::cout << "PreSave3" << std::endl;
     std::copy(mspMaps.begin(), mspMaps.end(), std::back_inserter(mvpBackupMaps));
     sort(mvpBackupMaps.begin(), mvpBackupMaps.end(), compFunctor());
 
-    std::cout << "PreSave4" << std::endl;
     std::set<GeometricCamera*> spCams(mvpCameras.begin(), mvpCameras.end());
     int i = 0;
     for(Map* pMi : mvpBackupMaps)
     {
-
-        std::cout << "PreSave inside 1loop " << i << std::endl;
         if(!pMi || pMi->IsBad())
             continue;
 
@@ -334,11 +328,8 @@ void Atlas::PreSave()
             SetMapBad(pMi);
             continue;
         }
-        std::cout << "PreSave inside 2loop " << i << std::endl;
         pMi->PreSave(spCams);
-        std::cout << "PreSave inside 3loop " << i << std::endl;
     }
-    std::cout << "PreSave5" << std::endl;
     RemoveBadMaps();
 }
 
