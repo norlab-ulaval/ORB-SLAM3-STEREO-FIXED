@@ -27,5 +27,5 @@ This will create **libORB_SLAM3.so**  at *lib* folder and the executables in *Ex
 Run Docker
 ```
 docker build -f .devcontainer/Dockerfile -t orbslam3offline .
-docker run -it --rm -v $(pwd):/workspaces/orbslam3 orbslam3offline:latest run_orbslam3
+docker run -it --rm -v $(pwd)/Examples/Stereo-Inertial/FoMo/winter:/dataset -v $(pwd)/output:/output -v fomo.yaml:/opt/orbslam3/fomo.yaml -e DATASET_PATH=/dataset -e OUTPUT_PATH=/output orbslam3offline:latest run_orbslam3
 ```

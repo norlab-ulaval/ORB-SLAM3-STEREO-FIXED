@@ -14,4 +14,4 @@ fi
 
 # Run ORB-SLAM3
 cd /output
-/opt/orbslam3/Examples/Stereo-Inertial/stereo_inertial_fomo /opt/orbslam3/ORBvoc.txt /workspaces/orbslam3/fomo.yaml /dataset
+/opt/orbslam3/Examples/Stereo-Inertial/stereo_inertial_fomo /opt/orbslam3/ORBvoc.txt /opt/orbslam3/fomo.yaml /dataset
