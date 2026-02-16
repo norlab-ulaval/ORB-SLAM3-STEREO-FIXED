@@ -40,7 +40,7 @@ RUN git clone https://github.com/norlab-ulaval/ORB-SLAM3-STEREO-FIXED.git -b off
     ./build.sh
 
 RUN cd /opt/orbslam3 && \
-    wget https://github.com/norlab-ulaval/ORB_SLAM3_ROS2/blob/main/vocabulary/ORBvoc.txt.tar.gz && \
+    wget https://github.com/norlab-ulaval/ORB_SLAM3_ROS2/raw/main/vocabulary/ORBvoc.txt.tar.gz && \
     tar -xvf ORBvoc.txt.tar.gz && \
     rm ORBvoc.txt.tar.gz
 
@@ -52,3 +52,4 @@ RUN cp /opt/orbslam3/run.sh /usr/local/bin/run_orbslam3
 
 # Clean up
 RUN apt-get autoremove -y && apt-get clean -y && rm -rf /var/lib/apt/lists/*
+RUN ldconfig
