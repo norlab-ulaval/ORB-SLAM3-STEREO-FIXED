@@ -1,0 +1,124 @@
+%YAML:1.0
+
+Atlas: true
+#System.SaveAtlasToFile: "ORB_SLAM3_ROS2/test_file"
+#System.LoadAtlasFromFile: "ORB_SLAM3_ROS2/test_file"
+#System.LocalizationMode: true
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters. Adjust them!
+#--------------------------------------------------------------------------------------------
+Camera.type: "PinHole"
+
+# Left Camera calibration and distortion parameters (OpenCV)
+Camera.fx: 738.0576171875
+Camera.fy: 738.0576171875
+Camera.cx: 936.5038452148438
+Camera.cy: 594.3272705078125
+
+# Kannala-Brandt distortion parameters
+Camera.k1: 0.0
+Camera.k2: 0.0
+Camera.p1: 0.0
+Camera.p2: 0.0
+Camera.k3: 0.0
+
+# Right Camera calibration and distortion parameters (OpenCV)
+Camera2.fx: 738.0576171875
+Camera2.fy: 738.0576171875
+Camera2.cx: 936.5038452148438
+Camera2.cy: 594.3272705078125
+
+# Kannala-Brandt distortion parameters
+Camera2.k1: 0.0
+Camera2.k2: 0.0
+Camera2.p1: 0.0
+Camera2.p2: 0.0
+Camera2.k3: 0.0
+
+# Transformation matrix from right camera to left camera
+Tlr: !!opencv-matrix
+  rows: 3
+  cols: 4
+  dt: f
+  data: [ 9.99963167e-01, -1.14231157e-03,  8.50647862e-03,  1.19702000e-01,
+          1.16531760e-03,  9.99995676e-01, -2.70006541e-03, -1.91556000e-04,
+          -8.50335752e-03,  2.70987871e-03,  9.99960174e-01,  5.27709000e-05]
+
+# Lapping area between images (We must calculate)
+#Camera.lappingBegin: 0
+#Camera.lappingEnd: 847
+
+#Camera2.lappingBegin: 0
+#Camera2.lappingEnd: 847
+
+# Camera resolution
+Camera.width: 1920
+Camera.height: 1200
+
+# Camera frames per second
+Camera.fps: 10.0
+
+# Color order of the images (0: BGR, 1: RGB. It is ignored if images are grayscale)
+Camera.RGB: 1
+
+# Image scale, it changes the image size to be processed (<1.0: reduce, >1.0: increase)
+Camera.imageScale: 1.0 # 1/sqrt(2)
+
+# Close/Far threshold. Baseline times.
+ThDepth: 120.0
+# stereo baseline times fx
+Camera.bf: 88.346972892578
+
+# Transformation from body-frame (imu) to left camera
+Tbc: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [0.9999023,-0.00055384,-0.01396742,0.05829737,
+          0.01307809,-0.31573685,0.94875666,0.9024112,
+          -0.00493549,-0.94884663,-0.31569876,0.16497196,
+          0.0,0.0,0.0,1.0]
+
+# Do not insert KFs when recently lost
+InsertKFsWhenLost: 0
+
+# IMU noise (Use those from VINS-mono)
+IMU.NoiseGyro: 6.170024194584988e-5 # 2.44e-4 #1e-3 # rad/s^0.5
+IMU.NoiseAcc: 0.0014475547298752243 # 1.47e-3 #1e-2 # m/s^1.5
+IMU.GyroWalk: 1.2754866476100412e-6 # rad/s^1.5
+IMU.AccWalk: 1.743080431796351e-5 # m/s^2.5
+IMU.Frequency: 200
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+# ORB Extractor: Number of features per image
+ORBextractor.nFeatures: 4000
+
+# ORB Extractor: Scale factor between levels in the scale pyramid
+ORBextractor.scaleFactor: 1.2
+
+# ORB Extractor: Number of levels in the scale pyramid
+ORBextractor.nLevels: 13
+
+# ORB Extractor: Fast threshold
+# Image is divided in a grid. At each cell FAST are extracted imposing a minimum response.
+# Firstly we impose iniThFAST. If no corners are detected we impose a lower value minThFAST
+# You can lower these values if your images have low contrast
+ORBextractor.iniThFAST: 12
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+#--------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3
+Viewer.ViewpointX: 0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500

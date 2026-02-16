@@ -318,6 +318,52 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, 
     // std::cout << "start GrabImageStereo" << std::endl;
     Sophus::SE3f Tcw = mpTracker->GrabImageStereo(imLeftToFeed,imRightToFeed,timestamp,filename);
 
+    // Export feature masks
+    if (!mpTracker->mCurrentFrame.mvKeys.empty()) {
+        cv::Mat maskLeft = cv::Mat::zeros(imLeftToFeed.size(), CV_8UC1);
+        cv::Mat maskRight = cv::Mat::zeros(imRightToFeed.size(), CV_8UC1);
+
+        const vector<cv::KeyPoint>& vKeysLeft = mpTracker->mCurrentFrame.mvKeys;
+        const vector<cv::KeyPoint>& vKeysRight = mpTracker->mCurrentFrame.mvKeysRight;
+        const vector<MapPoint*>& vMapPoints = mpTracker->mCurrentFrame.mvpMapPoints;
+        const vector<bool>& vOutliers = mpTracker->mCurrentFrame.mvbOutlier;
+
+        cv::Mat maskMatchedLeft = cv::Mat::zeros(imLeftToFeed.size(), CV_8UC1);
+
+        for (size_t i = 0; i < vKeysLeft.size(); i++) {
+            const cv::KeyPoint& kp = vKeysLeft[i];
+            int x = cvRound(kp.pt.x);
+            int y = cvRound(kp.pt.y);
+            if (x >= 0 && x < maskLeft.cols && y >= 0 && y < maskLeft.rows) {
+                maskLeft.at<uchar>(y, x) = 255;
+
+                if(i < vMapPoints.size() && vMapPoints[i] && (i >= vOutliers.size() || !vOutliers[i])) {
+                    maskMatchedLeft.at<uchar>(y, x) = 255;
+                }
+            }
+        }
+
+        for (const auto& kp : vKeysRight) {
+             int x = cvRound(kp.pt.x);
+             int y = cvRound(kp.pt.y);
+             if (x >= 0 && x < maskRight.cols && y >= 0 && y < maskRight.rows)
+                maskRight.at<uchar>(y, x) = 255;
+        }
+
+        std::stringstream ss;
+        ss << std::fixed << std::setprecision(6) << timestamp;
+        string ts_str = ss.str();
+
+        // Use filename if available to be more descriptive, otherwise timestamp
+        string name_suffix = filename.empty() ? ts_str : filename;
+        // Sanitize path separators if filename is a path
+        size_t last_slash = name_suffix.find_last_of("/\\");
+        if (last_slash != string::npos) name_suffix = name_suffix.substr(last_slash + 1);
+
+        cv::imwrite("feat_left_" + name_suffix + ".png", maskLeft);
+        cv::imwrite("matched_left_" + name_suffix + ".png", maskMatchedLeft);
+    }
+
     // std::cout << "out grabber" << std::endl;
 
     unique_lock<mutex> lock2(mMutexState);
@@ -763,14 +809,14 @@ void System::SaveTrajectoryEuRoC(const string &filename)
             Sophus::SE3f Twb = (pKF->mImuCalib.mTbc * (*lit) * Trw).inverse();
             Eigen::Quaternionf q = Twb.unit_quaternion();
             Eigen::Vector3f twb = Twb.translation();
-            f << setprecision(6) << 1e9*(*lT) << " " <<  setprecision(9) << twb(0) << " " << twb(1) << " " << twb(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
+            f << setprecision(6) << (*lT) << " " <<  setprecision(9) << twb(0) << " " << twb(1) << " " << twb(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
         }
         else
         {
             Sophus::SE3f Twc = ((*lit)*Trw).inverse();
             Eigen::Quaternionf q = Twc.unit_quaternion();
             Eigen::Vector3f twc = Twc.translation();
-            f << setprecision(6) << 1e9*(*lT) << " " <<  setprecision(9) << twc(0) << " " << twc(1) << " " << twc(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
+            f << setprecision(6) << (*lT) << " " <<  setprecision(9) << twc(0) << " " << twc(1) << " " << twc(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
         }
 
         // cout << "5" << endl;
