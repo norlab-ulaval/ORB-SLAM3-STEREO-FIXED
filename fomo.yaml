@@ -1,7 +1,7 @@
 %YAML:1.0
 
 Atlas: true
-#System.SaveAtlasToFile: "ORB_SLAM3_ROS2/test_file"
+System.SaveAtlasToFile: "/output/atlas"
 #System.LoadAtlasFromFile: "ORB_SLAM3_ROS2/test_file"
 #System.LocalizationMode: true
 

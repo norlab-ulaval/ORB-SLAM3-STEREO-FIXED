@@ -50,6 +50,9 @@ RUN mkdir /dataset
 # install /opt/orbslam3/run.sh systsem-wide
 RUN cp /opt/orbslam3/run.sh /usr/local/bin/run_orbslam3
 
+ENV DATASET_PATH=/dataset
+ENV OUTPUT_PATH=/output
+
 # Clean up
 RUN apt-get autoremove -y && apt-get clean -y && rm -rf /var/lib/apt/lists/*
 RUN ldconfig
