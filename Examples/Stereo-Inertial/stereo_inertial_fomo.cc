@@ -84,9 +84,10 @@ int main(int argc, char **argv)
     }
 
     // Find first imu to be considered, supposing imu measurements start first
-    while(vTimestampsImu[first_imu]<=vTimestampsCam[0])
+    while(first_imu<vTimestampsImu.size() && vTimestampsImu[first_imu]<=vTimestampsCam[0])
         first_imu++;
-    first_imu--; // first imu measurement to be considered
+    if(first_imu>0)
+        first_imu--; // first imu measurement to be considered
 
     // Create SLAM system. It initializes all system threads and gets ready to process frames.
     ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::IMU_STEREO, false);
@@ -129,12 +130,21 @@ int main(int argc, char **argv)
         vImuMeas.clear();
 
         if(ni>0)
-            while(vTimestampsImu[first_imu]<=vTimestampsCam[ni])
+            while(first_imu<vTimestampsImu.size() && vTimestampsImu[first_imu]<=vTimestampsCam[ni])
             {
                 vImuMeas.push_back(ORB_SLAM3::IMU::Point(vAcc[first_imu].x,vAcc[first_imu].y,vAcc[first_imu].z,
                                                          vGyro[first_imu].x,vGyro[first_imu].y,vGyro[first_imu].z,
                                                          vTimestampsImu[first_imu]));
                 first_imu++;
+            }
+            if(first_imu >= vTimestampsImu.size())
+            {
+                 double lastImuTime = vTimestampsImu.empty() ? 0.0 : vTimestampsImu.back();
+                 if (lastImuTime < vTimestampsCam[ni]) {
+                      cerr << "WARNING: IMU data exhausted at frame " << ni 
+                           << ". Last IMU timestamp: " << fixed << setprecision(6) << lastImuTime 
+                           << ", Current Cam timestamp: " << vTimestampsCam[ni] << endl;
+                 }
             }
 
         std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
@@ -269,4 +279,19 @@ void LoadIMU(const string &strImuPath, vector<double> &vTimeStamps, vector<cv::P
             vAcc.push_back(cv::Point3f(data[4], data[5], data[6]));
         }
     }
+
+    // Check for timestamp oscillation
+    // If detected, assume 200Hz freq for all samples
+    int inconsistencies = 0;
+    for(size_t i=1; i<vTimeStamps.size(); i++)
+    {
+        if(vTimeStamps[i] <= vTimeStamps[i-1])
+        {
+            vTimeStamps[i] = vTimeStamps[i-1] + 0.005;
+            inconsistencies++;
+        }
+    }
+
+    if(inconsistencies > 0)
+        cerr << "Corrected " << inconsistencies << " IMU timestamp inconsistencies (assumed 200Hz)." << endl;
 }
