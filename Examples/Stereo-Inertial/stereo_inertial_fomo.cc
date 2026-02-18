@@ -129,7 +129,9 @@ int main(int argc, char **argv)
         // Load imu measurements from previous frame
         vImuMeas.clear();
 
-        if(ni>0)
+        if(ni>0) {
+            // std::cout << std::fixed << "IMU Diff this frame last frame: " << vTimestampsImu[ni] - vTimestampsImu[ni-1] << std::endl;
+            // std::cout << std::fixed << "Cam Diff this frame last frame: " << vTimestampsCam[ni] - vTimestampsCam[ni-1] << std::endl;
             while(first_imu<vTimestampsImu.size() && vTimestampsImu[first_imu]<=vTimestampsCam[ni])
             {
                 vImuMeas.push_back(ORB_SLAM3::IMU::Point(vAcc[first_imu].x,vAcc[first_imu].y,vAcc[first_imu].z,
@@ -141,11 +143,16 @@ int main(int argc, char **argv)
             {
                  double lastImuTime = vTimestampsImu.empty() ? 0.0 : vTimestampsImu.back();
                  if (lastImuTime < vTimestampsCam[ni]) {
-                      cerr << "WARNING: IMU data exhausted at frame " << ni 
-                           << ". Last IMU timestamp: " << fixed << setprecision(6) << lastImuTime 
+                      cerr << "WARNING: IMU data exhausted at frame " << ni
+                           << ". Last IMU timestamp: " << fixed << setprecision(6) << lastImuTime
                            << ", Current Cam timestamp: " << vTimestampsCam[ni] << endl;
                  }
             }
+        }
+        if(vImuMeas.empty() && ni > 1000) {
+            cerr << "ERROR: No IMU measurements for frame " << ni << ", skipping." << endl;
+            break;
+        }
 
         std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
 
@@ -173,8 +180,8 @@ int main(int argc, char **argv)
         // Print real-time status
         std::cout << "Frame " << ni << ": "
                   << (ttrack < T ? "REAL-TIME" : "DELAYED")
-                  << " (processing: " << ttrack << "s, target: " << T << "s)"
-                  << std::endl;
+                  << " (processing: " << ttrack << "s, target: " << T << "s)\n"
+                  << "IMU measurements between frames: " << vImuMeas.size() << std::endl;
     }
 
     // Stop all threads
@@ -238,15 +245,16 @@ void LoadImages(const string &strPathLeft, const string &strPathRight,
         double t = stod(timestamp_str);
         vTimeStamps.push_back(t / 1e6); // Assuming timestamp in microseconds based on example filename 1738249093881602 (16 digits -> microseconds for epoch time)
     }
+    std::cout << std::fixed << "Last camera timestamp: " << vTimeStamps.back() << std::endl;
 }
 
 void LoadIMU(const string &strImuPath, vector<double> &vTimeStamps, vector<cv::Point3f> &vAcc, vector<cv::Point3f> &vGyro)
 {
     ifstream fImu;
     fImu.open(strImuPath.c_str());
-    vTimeStamps.reserve(5000);
-    vAcc.reserve(5000);
-    vGyro.reserve(5000);
+    vTimeStamps.reserve(30000);
+    vAcc.reserve(30000);
+    vGyro.reserve(30000);
 
     string s;
     getline(fImu, s); // Skip header: t,ax,ay,az,lx,ly,lz
@@ -279,19 +287,5 @@ void LoadIMU(const string &strImuPath, vector<double> &vTimeStamps, vector<cv::P
             vAcc.push_back(cv::Point3f(data[4], data[5], data[6]));
         }
     }
-
-    // Check for timestamp oscillation
-    // If detected, assume 200Hz freq for all samples
-    int inconsistencies = 0;
-    for(size_t i=1; i<vTimeStamps.size(); i++)
-    {
-        if(vTimeStamps[i] <= vTimeStamps[i-1])
-        {
-            vTimeStamps[i] = vTimeStamps[i-1] + 0.005;
-            inconsistencies++;
-        }
-    }
-
-    if(inconsistencies > 0)
-        cerr << "Corrected " << inconsistencies << " IMU timestamp inconsistencies (assumed 200Hz)." << endl;
+    std::cout << std::fixed << "Last imu timestamp: " << vTimeStamps.back() << std::endl;
 }
