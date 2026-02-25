@@ -41,9 +41,9 @@ void LoadIMU(const string &strImuPath, vector<double> &vTimeStamps, vector<cv::P
 
 int main(int argc, char **argv)
 {
-    if(argc < 4)
+    if(argc < 5)
     {
-        cerr << endl << "Usage: ./stereo_inertial_fomo path_to_vocabulary path_to_settings path_to_sequence_folder" << endl;
+        cerr << endl << "Usage: ./stereo_inertial_fomo path_to_vocabulary path_to_settings path_to_sequence_folder output_trajectory_path" << endl;
         return 1;
     }
 
@@ -91,6 +91,18 @@ int main(int argc, char **argv)
 
     // Create SLAM system. It initializes all system threads and gets ready to process frames.
     ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::IMU_STEREO, false);
+
+    cv::FileStorage fSettings(argv[2], cv::FileStorage::READ);
+    cv::Mat cvTbc;
+    fSettings["Tbc"] >> cvTbc;
+    if(cvTbc.type() != CV_32F)
+        cvTbc.convertTo(cvTbc, CV_32F);
+    Eigen::Matrix<float,4,4,Eigen::RowMajor> eigTbc(cvTbc.ptr<float>(0));
+    Sophus::SE3f Tbc(eigTbc);
+
+    string strOutName(argv[4]);
+    std::ofstream odomFile(strOutName + "_bak");
+    odomFile << fixed;
 
     // Vector for tracking time statistics
     vector<float> vTimesTrack;
@@ -158,7 +170,18 @@ int main(int argc, char **argv)
 
 
         // Pass the images to the SLAM system
-        SLAM.TrackStereo(imLeft,imRight,tframe,vImuMeas);
+        Sophus::SE3f Tcw = SLAM.TrackStereo(imLeft,imRight,tframe,vImuMeas);
+        
+        int trackingState = SLAM.GetTrackingState();
+        if(trackingState == 2 || trackingState == 5) // OK=2, OK_KLT=5
+        {
+            Sophus::SE3f Twb = (Tbc * Tcw).inverse();
+            Eigen::Vector3f twb = Twb.translation();
+            Eigen::Quaternionf q = Twb.unit_quaternion();
+            odomFile << setprecision(6) << tframe << " "
+                     << setprecision(9) << twb(0) << " " << twb(1) << " " << twb(2) << " "
+                     << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << "\n";
+        }
 
         std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
 
@@ -184,12 +207,14 @@ int main(int argc, char **argv)
                   << "IMU measurements between frames: " << vImuMeas.size() << std::endl;
     }
 
+    odomFile.close();
+
     // Stop all threads
     SLAM.Shutdown();
 
     // Save camera trajectory
-    SLAM.SaveTrajectoryEuRoC("trajectory.txt");
-    SLAM.SaveKeyFrameTrajectoryEuRoC("KeyFrameTrajectory.txt");
+    SLAM.SaveTrajectoryEuRoC(strOutName);
+    SLAM.SaveKeyFrameTrajectoryEuRoC(strOutName + "_kf");
 
     ORB_SLAM3::Atlas* atlas = nullptr;
     atlas = SLAM.GetAtlas();
