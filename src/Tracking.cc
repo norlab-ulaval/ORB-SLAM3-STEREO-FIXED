@@ -1829,7 +1829,22 @@ void Tracking::Track()
         {
             // cout << mCurrentFrame.mTimeStamp << ", " << mLastFrame.mTimeStamp << endl;
             // cout << "id last: " << mLastFrame.mnId << "    id curr: " << mCurrentFrame.mnId << endl;
-            if(mpAtlas->isInertial())
+
+            // In localization mode we must NOT reset or create a new map on a timestamp
+            // gap – the loaded atlas is the only reference we have.  Let the normal
+            // LOST → Relocalization path handle recovery instead.
+            if(mbOnlyTracking)
+            {
+                // In localization mode never destroy the loaded atlas.
+                // Just clear stale IMU data and fall through to the normal
+                // LOST → Relocalization path below.
+                cout << "Timestamp jump detected in localization mode. Clearing IMU queue and attempting relocalization." << endl;
+                mState = LOST;
+                unique_lock<mutex> lock(mMutexImuQueue);
+                mlQueueImuData.clear();
+                // Do NOT return – fall through so Relocalization() is called.
+            }
+            else if(mpAtlas->isInertial())
             {
 
                 if(mpAtlas->isImuInitialized())
@@ -1861,7 +1876,11 @@ void Tracking::Track()
 
     if(mState==NO_IMAGES_YET)
     {
-        mState = NOT_INITIALIZED;
+        if (mbOnlyTracking && mpAtlas->GetAllMaps().size() > 0 && pCurrentMap && pCurrentMap->KeyFramesInMap() > 0) {
+            mState = LOST;
+        } else {
+            mState = NOT_INITIALIZED;
+        }
     }
 
     mLastProcessedState=mState;
@@ -2078,7 +2097,7 @@ void Tracking::Track()
                     }
                     bOKReloc = Relocalization();
 
-                    if(bOKMM && !bOKReloc)
+                    if(bOKMM && !bOKReloc && !mbOnlyTracking)
                     {
                         mCurrentFrame.SetPose(TcwMM);
                         mCurrentFrame.mvpMapPoints = vpMPsMM;
@@ -2100,7 +2119,10 @@ void Tracking::Track()
                         mbVO = false;
                     }
 
-                    bOK = bOKReloc || bOKMM;
+                    if(mbOnlyTracking)
+                        bOK = bOKReloc;
+                    else
+                        bOK = bOKReloc || bOKMM;
                 }
             }
         }
@@ -2143,7 +2165,10 @@ void Tracking::Track()
             mState = OK;
         else if (mState == OK)
         {
-            if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+            if (mbOnlyTracking) {
+                mState = LOST;
+            }
+            else if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
             {
                 Verbose::PrintMess("Track lost for less than one second...", Verbose::VERBOSITY_NORMAL);
                 if(!pCurrentMap->isImuInitialized() || !pCurrentMap->GetIniertialBA2())
@@ -2163,18 +2188,6 @@ void Tracking::Track()
             //}
         }
 
-        // Save frame if recent relocalization, since they are used for IMU reset (as we are making copy, it shluld be once mCurrFrame is completely modified)
-        if((mCurrentFrame.mnId<(mnLastRelocFrameId+mnFramesToResetIMU)) && (mCurrentFrame.mnId > mnFramesToResetIMU) &&
-           (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && pCurrentMap->isImuInitialized())
-        {
-            // TODO check this situation
-            Verbose::PrintMess("Saving pointer to frame. imu needs reset...", Verbose::VERBOSITY_NORMAL);
-            Frame* pF = new Frame(mCurrentFrame);
-            pF->mpPrevFrame = new Frame(mLastFrame);
-
-            // Load preintegration
-            pF->mpImuPreintegratedFrame = new IMU::Preintegrated(mCurrentFrame.mpImuPreintegratedFrame);
-        }
 
         if(pCurrentMap->isImuInitialized())
         {
@@ -2270,6 +2283,13 @@ void Tracking::Track()
         // Reset if the camera get lost soon after initialization
         if(mState==LOST)
         {
+            if (mbOnlyTracking) {
+                // Update mLastFrame so the next frame's timestamp-jump check has
+                // a valid reference and does not fire on every subsequent frame.
+                mLastFrame = Frame(mCurrentFrame);
+                return;
+            }
+
             if(pCurrentMap->KeyFramesInMap()<=10)
             {
                 mpSystem->ResetActiveMap();

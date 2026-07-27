@@ -108,6 +108,14 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         activeLC = static_cast<int>(fsSettings["loopClosing"]) != 0;
     }
 
+    node = fsSettings["System.LocalizationMode"];
+    if(!node.empty())
+    {
+        mbActivateLocalizationMode = static_cast<int>(fsSettings["System.LocalizationMode"]) != 0;
+        if(mbActivateLocalizationMode)
+            cout << "System.LocalizationMode enabled from settings!" << endl;
+    }
+
     mStrVocabularyFilePath = strVocFile;
 
     bool loadedAtlas = false;
@@ -171,7 +179,14 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
 
         loadedAtlas = true;
 
-        mpAtlas->CreateNewMap();
+        if (!mbActivateLocalizationMode) {
+            mpAtlas->CreateNewMap();
+        } else {
+            vector<Map*> vMaps = mpAtlas->GetAllMaps();
+            if(!vMaps.empty()) {
+                mpAtlas->ChangeMap(vMaps[0]);
+            }
+        }
 
         //clock_t timeElapsed = clock() - start;
         //unsigned msElapsed = timeElapsed / (CLOCKS_PER_SEC / 1000);
@@ -360,8 +375,8 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, 
         size_t last_slash = name_suffix.find_last_of("/\\");
         if (last_slash != string::npos) name_suffix = name_suffix.substr(last_slash + 1);
 
-        cv::imwrite("feat_left_" + name_suffix + ".png", maskLeft);
-        cv::imwrite("matched_left_" + name_suffix + ".png", maskMatchedLeft);
+        // cv::imwrite("feat_left_" + name_suffix + ".png", maskLeft);
+        // cv::imwrite("matched_left_" + name_suffix + ".png", maskMatchedLeft);
     }
 
     // std::cout << "out grabber" << std::endl;
@@ -579,20 +594,13 @@ void System::Shutdown()
             usleep(5000);
     }*/
 
-    // Wait until all thread have effectively stopped
-    /*while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
+    // Wait until all threads have effectively stopped.
+    // Without this, LocalMapping/LoopClosing may still be modifying the atlas
+    // when the caller reads it, causing heap corruption (malloc double-linked list error).
+    while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished())
     {
-        if(!mpLocalMapper->isFinished())
-            cout << "mpLocalMapper is not finished" << endl;*/
-        /*if(!mpLoopCloser->isFinished())
-            cout << "mpLoopCloser is not finished" << endl;
-        if(mpLoopCloser->isRunningGBA()){
-            cout << "mpLoopCloser is running GBA" << endl;
-            cout << "break anyway..." << endl;
-            break;
-        }*/
-        /*usleep(5000);
-    }*/
+        usleep(5000);
+    }
 
     if(!mStrSaveAtlasToFile.empty())
     {

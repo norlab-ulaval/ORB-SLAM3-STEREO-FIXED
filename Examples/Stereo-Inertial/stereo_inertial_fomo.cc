@@ -34,16 +34,46 @@
 
 using namespace std;
 
+struct TrajectoryPoint {
+    double t;
+    Eigen::Vector3f twb;
+    Eigen::Quaternionf q;
+};
+
 void LoadImages(const string &strPathLeft, const string &strPathRight,
                 vector<string> &vstrImageLeft, vector<string> &vstrImageRight, vector<double> &vTimeStamps);
 
 void LoadIMU(const string &strImuPath, vector<double> &vTimeStamps, vector<cv::Point3f> &vAcc, vector<cv::Point3f> &vGyro);
 
+// Subtract `offset` from the first (whitespace-separated) token on every non-empty line
+// of `path`.  `scale` converts the offset from seconds to whatever unit the file uses
+// (1.0 for TUM/seconds, 1e9 for EuRoC/nanoseconds).
+void CorrectTimestamps(const string &path, double offset, double scale = 1.0)
+{
+    ifstream fin(path);
+    if(!fin.is_open()) { cerr << "CorrectTimestamps: cannot open " << path << endl; return; }
+    ostringstream buf;
+    string line;
+    while(getline(fin, line))
+    {
+        if(line.empty()) { buf << "\n"; continue; }
+        istringstream iss(line);
+        double ts;
+        if(!(iss >> ts)) { buf << line << "\n"; continue; } // pass comment/header lines through
+        string rest;
+        getline(iss, rest);
+        buf << fixed << setprecision(6) << (ts - offset * scale) << rest << "\n";
+    }
+    fin.close();
+    ofstream fout(path, ios::trunc);
+    fout << buf.str();
+}
+
 int main(int argc, char **argv)
 {
     if(argc < 5)
     {
-        cerr << endl << "Usage: ./stereo_inertial_fomo path_to_vocabulary path_to_settings path_to_sequence_folder output_trajectory_path" << endl;
+        cerr << endl << "Usage: ./stereo_inertial_fomo path_to_vocabulary path_to_settings path_to_sequence_folder output_trajectory_path [time_offset_seconds]" << endl;
         return 1;
     }
 
@@ -54,7 +84,6 @@ int main(int argc, char **argv)
     vector<cv::Point3f> vAcc, vGyro;
     vector<double> vTimestampsImu;
     int nImages;
-    int first_imu = 0;
 
     string pathSeq(argv[3]);
     string pathCam0 = pathSeq + "/zedx_left";
@@ -83,14 +112,74 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    // Find first imu to be considered, supposing imu measurements start first
-    while(first_imu<vTimestampsImu.size() && vTimestampsImu[first_imu]<=vTimestampsCam[0])
+    // Create SLAM system first so we can read the atlas timestamps before deciding the offset.
+    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::IMU_STEREO, true);
+
+    // --- Auto-compute time offset from the atlas ---
+    // The atlas keyframes carry the absolute timestamps from the mapping session.
+    // The query dataset may come from a different date.  We align the query timestamps
+    // so that the first camera frame lands just before the earliest keyframe in the atlas.
+    const double kAtlasMarginSec = 5.0; // seconds before the first atlas KF
+    double time_offset = 0.0;
+    {
+        ORB_SLAM3::Atlas* pAtlas = SLAM.GetAtlas();
+        double atlas_min_ts = std::numeric_limits<double>::max();
+        if(pAtlas)
+        {
+            for(ORB_SLAM3::Map* pMap : pAtlas->GetAllMaps())
+                for(ORB_SLAM3::KeyFrame* pKF : pMap->GetAllKeyFrames())
+                    if(pKF && !pKF->isBad())
+                        atlas_min_ts = std::min(atlas_min_ts, pKF->mTimeStamp);
+        }
+
+        if(atlas_min_ts < std::numeric_limits<double>::max())
+        {
+            // offset such that: vTimestampsCam[0] + offset = atlas_min_ts - kAtlasMarginSec
+            double auto_offset = atlas_min_ts - kAtlasMarginSec - vTimestampsCam[0];
+
+            if(argc >= 6)
+            {
+                // CLI argument is treated as an explicit override; warn if it differs significantly.
+                double cli_offset = stod(argv[5]);
+                double diff = std::abs(cli_offset - auto_offset);
+                if(diff > 10.0)
+                    cerr << "WARNING: CLI time_offset (" << cli_offset
+                         << " s) differs from auto-computed offset (" << auto_offset
+                         << " s) by " << diff << " s. Using CLI value as override." << endl;
+                time_offset = cli_offset;
+            }
+            else
+            {
+                time_offset = auto_offset;
+            }
+
+            cout << "Atlas earliest KF timestamp: " << fixed << setprecision(3) << atlas_min_ts << " s" << endl;
+            cout << "Dataset first cam timestamp: " << vTimestampsCam[0] << " s" << endl;
+            cout << "Applying time offset:        " << time_offset << " s" << endl;
+        }
+        else
+        {
+            // No atlas loaded (pure mapping mode) – fall back to CLI argument if provided.
+            if(argc >= 6)
+            {
+                time_offset = stod(argv[5]);
+                cout << "No atlas loaded. Applying CLI time offset: " << time_offset << " s" << endl;
+            }
+        }
+    }
+
+    if(time_offset != 0.0)
+    {
+        for(size_t i=0; i<vTimestampsCam.size(); i++) vTimestampsCam[i] += time_offset;
+        for(size_t i=0; i<vTimestampsImu.size();  i++) vTimestampsImu[i]  += time_offset;
+    }
+
+    // Find first IMU measurement to consider (must be re-done after offset is applied).
+    int first_imu = 0;
+    while(first_imu<(int)vTimestampsImu.size() && vTimestampsImu[first_imu]<=vTimestampsCam[0])
         first_imu++;
     if(first_imu>0)
         first_imu--; // first imu measurement to be considered
-
-    // Create SLAM system. It initializes all system threads and gets ready to process frames.
-    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::IMU_STEREO, false);
 
     cv::FileStorage fSettings(argv[2], cv::FileStorage::READ);
     cv::Mat cvTbc;
@@ -112,10 +201,19 @@ int main(int argc, char **argv)
     cout << "Start processing sequence ..." << endl;
     cout << "Images in the sequence: " << nImages << endl << endl;
 
+
     cv::Mat imLeft, imRight;
     vector<ORB_SLAM3::IMU::Point> vImuMeas;
     double t_track = 0.f;
 
+    bool bHasLocalized = false;
+    bool bImuExcited = false;
+    double tLost = -1.0;
+
+    std::vector<std::vector<TrajectoryPoint>> trajectory_segments;
+    std::vector<TrajectoryPoint> current_segment;
+
+    // Main loop
     for(int ni=0; ni<nImages; ni++)
     {
         // Read left and right images from file
@@ -166,21 +264,53 @@ int main(int argc, char **argv)
             break;
         }
 
+        if(!bImuExcited) {
+            for(size_t i=0; i<vImuMeas.size(); i++) {
+                if (vImuMeas[i].w.norm() > 0.1 || std::abs(vImuMeas[i].a.norm() - 9.81) > 0.5) {
+                    bImuExcited = true;
+                    cout << "IMU Excitation detected at frame " << ni << ". Starting processing." << endl;
+                    break;
+                }
+            }
+            // Note: we do NOT skip the frame here any more.  Feeding every frame to
+            // TrackStereo keeps mLastFrame up-to-date so that when the first excited
+            // frame arrives the tracker does not see a multi-second timestamp jump
+            // that would otherwise destroy the loaded atlas map.
+        }
+
         std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
-
-
         // Pass the images to the SLAM system
         Sophus::SE3f Tcw = SLAM.TrackStereo(imLeft,imRight,tframe,vImuMeas);
         
         int trackingState = SLAM.GetTrackingState();
         if(trackingState == 2 || trackingState == 5) // OK=2, OK_KLT=5
         {
+            if (tLost >= 0 && !current_segment.empty()) {
+                trajectory_segments.push_back(current_segment);
+                current_segment.clear();
+            }
+            bHasLocalized = true;
+            tLost = -1.0; // Reset lost timer upon localization/relocalization
             Sophus::SE3f Twb = (Tbc * Tcw).inverse();
-            Eigen::Vector3f twb = Twb.translation();
-            Eigen::Quaternionf q = Twb.unit_quaternion();
-            odomFile << setprecision(6) << tframe << " "
-                     << setprecision(9) << twb(0) << " " << twb(1) << " " << twb(2) << " "
-                     << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << "\n";
+            TrajectoryPoint pt;
+            pt.t = tframe;
+            pt.twb = Twb.translation();
+            pt.q = Twb.unit_quaternion();
+            current_segment.push_back(pt);
+        }
+        else if(trackingState == 4 && bHasLocalized) // LOST
+        {
+            if (tLost < 0) {
+                tLost = tframe;
+                if (!current_segment.empty()) {
+                    trajectory_segments.push_back(current_segment);
+                    current_segment.clear();
+                }
+                cerr << "Tracking lost (State: LOST) at frame " << ni << ". Will retry for 10 seconds..." << endl;
+            } else if (tframe - tLost > 10.0) {
+                cerr << "Tracking lost for over 10 seconds. Stopping sequence to save trajectory..." << endl;
+                break;
+            }
         }
 
         std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
@@ -207,7 +337,67 @@ int main(int argc, char **argv)
                   << "IMU measurements between frames: " << vImuMeas.size() << std::endl;
     }
 
+    if (!current_segment.empty()) {
+        trajectory_segments.push_back(current_segment);
+    }
+    
+    size_t max_len = 0;
+    int max_idx = -1;
+    for (size_t i = 0; i < trajectory_segments.size(); ++i) {
+        if (trajectory_segments[i].size() > max_len) {
+            max_len = trajectory_segments[i].size();
+            max_idx = i;
+        }
+    }
+
+    if (max_idx >= 0) {
+        for (const auto& pt : trajectory_segments[max_idx]) {
+            odomFile << setprecision(6) << pt.t << " "
+                     << setprecision(9) << pt.twb(0) << " " << pt.twb(1) << " " << pt.twb(2) << " "
+                     << pt.q.x() << " " << pt.q.y() << " " << pt.q.z() << " " << pt.q.w() << "\n";
+        }
+    }
+
     odomFile.close();
+
+    // --- Atlas integrity check & pointcloud export (must run BEFORE Shutdown) ---
+    // After Shutdown() the internal map data is freed; accessing it causes a segfault.
+    {
+        ORB_SLAM3::Atlas* atlas = SLAM.GetAtlas();
+        if(atlas)
+        {
+            auto allMaps = atlas->GetAllMaps();
+            size_t nKFs  = (atlas->GetCurrentMap()) ? atlas->GetCurrentMap()->KeyFramesInMap() : 0;
+            auto   allMP = atlas->GetAllMapPoints();
+            size_t nGoodMP = 0;
+            for(auto* pMP : allMP)
+                if(pMP && !pMP->isBad()) nGoodMP++;
+
+            cout << "\n=== Atlas Integrity Check ===" << endl;
+            cout << "  Maps in atlas:       " << allMaps.size() << "  (expected: 1 for pure localization)" << endl;
+            cout << "  KFs in current map:  " << nKFs           << "  (expected: same as loaded atlas)"    << endl;
+            cout << "  Good map points:     " << nGoodMP        << endl;
+            if(allMaps.size() == 1)
+                cout << "  [PASS] Single map – localised against loaded atlas, no new map created." << endl;
+            else
+                cout << "  [FAIL] Multiple maps detected – new maps were created during the run." << endl;
+            cout << "=============================" << endl;
+
+            // Export map points to pointcloud.csv
+            std::string filename = "pointcloud.csv";
+            std::ofstream file(filename);
+            for(ORB_SLAM3::MapPoint* pMP : allMP)
+            {
+                if(pMP && !pMP->isBad())
+                {
+                    Eigen::Vector3f pos = pMP->GetWorldPos();
+                    file << pos.x() << "," << pos.y() << "," << pos.z() << "\n";
+                }
+            }
+            file.close();
+            cout << "Point cloud written to " << filename << " (" << nGoodMP << " points)" << endl;
+        }
+    }
 
     // Stop all threads
     SLAM.Shutdown();
@@ -216,20 +406,16 @@ int main(int argc, char **argv)
     SLAM.SaveTrajectoryEuRoC(strOutName);
     SLAM.SaveKeyFrameTrajectoryEuRoC(strOutName + "_kf");
 
-    ORB_SLAM3::Atlas* atlas = nullptr;
-    atlas = SLAM.GetAtlas();
-
-    std::string filename = "pointcloud.csv";
-    std::ofstream file(filename);
-    for(ORB_SLAM3::MapPoint* pMP : atlas->GetAllMapPoints())
+    // Correct timestamps: the time_offset was added before feeding frames to SLAM,
+    // so all saved timestamps are `time_offset` seconds too large.
+    if(time_offset != 0.0)
     {
-        if(pMP && !pMP->isBad())
-        {
-            Eigen::Vector3f pos = pMP->GetWorldPos();
-            file << pos.x() << "," << pos.y() << "," << pos.z() << std::endl;
-        }
+        cout << "Correcting timestamps in output files (offset = " << time_offset << " s)..." << endl;
+        CorrectTimestamps(strOutName + "_bak", time_offset, 1.0);   // seconds
+        CorrectTimestamps(strOutName,           time_offset, 1e9);  // nanoseconds
+        CorrectTimestamps(strOutName + "_kf",   time_offset, 1e9);  // nanoseconds
+        cout << "Timestamp correction done." << endl;
     }
-    file.close();
 
     return 0;
 }
@@ -244,6 +430,7 @@ void LoadImages(const string &strPathLeft, const string &strPathRight,
     if ((dir = opendir(strPathLeft.c_str())) != NULL) {
         while ((ent = readdir(dir)) != NULL) {
             string filename = ent->d_name;
+            if (filename.length() > 0 && filename[0] == '.') continue;
             if (filename.length() > 4 && filename.substr(filename.length() - 4) == ".png") {
                 filenames.push_back(filename);
             }
@@ -268,7 +455,7 @@ void LoadImages(const string &strPathLeft, const string &strPathRight,
         // Extract timestamp from filename (remove .png extension)
         string timestamp_str = filename.substr(0, filename.length() - 4);
         double t = stod(timestamp_str);
-        vTimeStamps.push_back(t / 1e6); // Assuming timestamp in microseconds based on example filename 1738249093881602 (16 digits -> microseconds for epoch time)
+        vTimeStamps.push_back(t / 1e6); // timestamp in microseconds
     }
     std::cout << std::fixed << "Last camera timestamp: " << vTimeStamps.back() << std::endl;
 }

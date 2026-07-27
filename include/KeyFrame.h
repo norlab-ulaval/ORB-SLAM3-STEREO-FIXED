@@ -280,6 +280,8 @@ public:
     }
 
     static bool lId(KeyFrame* pKF1, KeyFrame* pKF2){
+        if(!pKF1) return false;
+        if(!pKF2) return true;
         return pKF1->mnId<pKF2->mnId;
     }
 

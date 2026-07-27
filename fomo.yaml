@@ -1,9 +1,13 @@
 %YAML:1.0
 
 Atlas: true
-System.SaveAtlasToFile: "/output/atlas"
-#System.LoadAtlasFromFile: "ORB_SLAM3_ROS2/test_file"
-#System.LocalizationMode: true
+# System.SaveAtlasToFile: "/workspaces/ORB-SLAM3-STEREO-FIXED/data/red_2025-06-26-10-31/atlas_new"
+System.SaveAtlasToFile: "/workspaces/ORB-SLAM3-STEREO-FIXED/data/yellow_2025-10-14-14-48/atlas_new"
+# System.LoadAtlasFromFile: "/workspaces/ORB-SLAM3-STEREO-FIXED/data/red_2025-06-26-10-31/atlas"
+# System.LoadAtlasFromFile: "/workspaces/ORB-SLAM3-STEREO-FIXED/data/red_2025-08-20-10-42/atlas"
+# System.LoadAtlasFromFile: "/workspaces/ORB-SLAM3-STEREO-FIXED/data/yellow_2025-10-14-14-48/atlas"
+# System.LoadAtlasFromFile: "/workspaces/ORB-SLAM3-STEREO-FIXED/data/orange_2025-06-26-10-48/atlas"
+# System.LocalizationMode: true
 
 #--------------------------------------------------------------------------------------------
 # Camera Parameters. Adjust them!
