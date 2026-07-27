@@ -25,6 +25,12 @@
 #include <sstream>
 #include <vector>
 #include <dirent.h>
+#include <thread>
+#include <future>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
+#include <functional>
 
 #include <opencv2/core/core.hpp>
 
@@ -33,6 +39,48 @@
 #include "Optimizer.h"
 
 using namespace std;
+
+// ---------------------------------------------------------------------------
+// BoundedQueue: a thread-safe FIFO with a maximum capacity.
+// put() blocks when the queue is full; get() blocks when it is empty.
+// ---------------------------------------------------------------------------
+template<typename T>
+class BoundedQueue {
+public:
+    explicit BoundedQueue(size_t maxSize) : maxSize_(maxSize) {}
+
+    void put(T item) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        notFull_.wait(lock, [this]{ return queue_.size() < maxSize_; });
+        queue_.push(std::move(item));
+        notEmpty_.notify_one();
+    }
+
+    T get() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        notEmpty_.wait(lock, [this]{ return !queue_.empty(); });
+        T item = std::move(queue_.front());
+        queue_.pop();
+        notFull_.notify_one();
+        return item;
+    }
+
+private:
+    std::queue<T>            queue_;
+    const size_t             maxSize_;
+    std::mutex               mutex_;
+    std::condition_variable  notFull_;
+    std::condition_variable  notEmpty_;
+};
+
+// Load a stereo image pair synchronously (called from the thread pool).
+std::pair<cv::Mat,cv::Mat> LoadImagePair(const std::string& leftPath,
+                                          const std::string& rightPath)
+{
+    cv::Mat l = cv::imread(leftPath,  cv::IMREAD_UNCHANGED);
+    cv::Mat r = cv::imread(rightPath, cv::IMREAD_UNCHANGED);
+    return {l, r};
+}
 
 struct TrajectoryPoint {
     double t;
@@ -213,17 +261,74 @@ int main(int argc, char **argv)
     std::vector<std::vector<TrajectoryPoint>> trajectory_segments;
     std::vector<TrajectoryPoint> current_segment;
 
+    // Per-frame timing log (mirrors Python timing_logs list)
+    struct TimingLog {
+        int    frame;
+        double img_ms;   // time blocked waiting for preloaded image future
+        double slam_ms;  // TrackStereo wall time
+        double full_ms;  // total frame wall time (img + slam + misc)
+    };
+    std::vector<TimingLog> timingLogs;
+    timingLogs.reserve(nImages);
+
+    // -----------------------------------------------------------------------
+    // Image pre-loading pipeline
+    //
+    // A producer thread submits (left, right) image-load tasks to a thread
+    // pool and enqueues the resulting std::future into a bounded queue
+    // (capacity = 100 frames).  The main loop dequeues and resolves each
+    // future just before it needs the images, so disk I/O is fully
+    // overlapped with SLAM processing – mirroring the Python pattern:
+    //
+    //   image_queue = queue.Queue(maxsize=100)
+    //   future = executor.submit(load_images, meta['images_paths'])
+    //   image_queue.put((meta['timestamp'], future))
+    // -----------------------------------------------------------------------
+    using ImageFuture = std::future<std::pair<cv::Mat,cv::Mat>>;
+    using QueueItem   = std::pair<int /*ni*/, ImageFuture>;
+
+    // Bounded queue: producer blocks once 100 prefetched futures are pending.
+    BoundedQueue<QueueItem> imageQueue(100);
+
+    // Producer thread: submits async imread tasks and fills the queue.
+    std::thread producerThread([&]() {
+        for(int i = 0; i < nImages; ++i) {
+            // std::async with std::launch::async guarantees a new thread from
+            // the runtime's thread pool for each task.
+            ImageFuture f = std::async(std::launch::async,
+                                       LoadImagePair,
+                                       vstrImageLeft[i],
+                                       vstrImageRight[i]);
+            imageQueue.put({i, std::move(f)});
+        }
+    });
+
     // Main loop
     for(int ni=0; ni<nImages; ni++)
     {
-        // Read left and right images from file
-        imLeft = cv::imread(vstrImageLeft[ni],cv::IMREAD_UNCHANGED);
-        imRight = cv::imread(vstrImageRight[ni],cv::IMREAD_UNCHANGED);
+        auto t_frame_start = std::chrono::steady_clock::now();
+
+        // -------------------------------------------------------------------
+        // Stage 1: image load
+        // Dequeue the pre-loading future for this frame and wait for the
+        // images to be ready.  In the common case the future is already
+        // resolved because disk I/O finished while the previous frame was
+        // being tracked.
+        // -------------------------------------------------------------------
+        auto [qni, imgFuture] = imageQueue.get();
+        assert(qni == ni && "Image queue frame index mismatch");
+        auto [imLeftLoaded, imRightLoaded] = imgFuture.get();
+        imLeft  = imLeftLoaded;
+        imRight = imRightLoaded;
+
+        auto t_img_end = std::chrono::steady_clock::now();
+        double img_ms = std::chrono::duration<double,std::milli>(t_img_end - t_frame_start).count();
 
         if(imLeft.empty())
         {
             cerr << endl << "Failed to load image at: "
                  << string(vstrImageLeft[ni]) << endl;
+            producerThread.detach(); // don't block on cleanup
             return 1;
         }
 
@@ -231,6 +336,7 @@ int main(int argc, char **argv)
         {
             cerr << endl << "Failed to load image at: "
                  << string(vstrImageRight[ni]) << endl;
+            producerThread.detach();
             return 1;
         }
 
@@ -278,10 +384,14 @@ int main(int argc, char **argv)
             // that would otherwise destroy the loaded atlas map.
         }
 
-        std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
-        // Pass the images to the SLAM system
+        // -------------------------------------------------------------------
+        // Stage 2: SLAM tracking
+        // -------------------------------------------------------------------
+        auto t_slam_start = std::chrono::steady_clock::now();
         Sophus::SE3f Tcw = SLAM.TrackStereo(imLeft,imRight,tframe,vImuMeas);
-        
+        auto t_slam_end = std::chrono::steady_clock::now();
+        double slam_ms = std::chrono::duration<double,std::milli>(t_slam_end - t_slam_start).count();
+
         int trackingState = SLAM.GetTrackingState();
         if(trackingState == 2 || trackingState == 5) // OK=2, OK_KLT=5
         {
@@ -313,11 +423,15 @@ int main(int argc, char **argv)
             }
         }
 
-        std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
+        double full_ms = std::chrono::duration<double,std::milli>(
+            std::chrono::steady_clock::now() - t_frame_start).count();
 
-        double ttrack= std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count();
+        // Store timing for rolling average
+        timingLogs.push_back({ni, img_ms, slam_ms, full_ms});
 
-        vTimesTrack[ni]=ttrack;
+        // Keep ttrack in seconds for the real-time sleep logic (unchanged)
+        double ttrack = slam_ms / 1000.0;
+        vTimesTrack[ni] = ttrack;
 
         // Wait to load the next frame
         double T=0;
@@ -329,13 +443,49 @@ int main(int argc, char **argv)
         if(ttrack<T)
             usleep((T-ttrack)*1e6);
 
+        // -------------------------------------------------------------------
+        // Print statistics
+        //
+        // Per-frame breakdown (every frame, 1 line):
+        //   Frame N: REAL-TIME/DELAYED  Img: X.Xms  SLAM: X.Xms  Full: X.Xms  IMU: N
+        //
+        // Rolling-average progress (every 50 frames, 1 extra line):
+        //   [Progress] Frame N/Total | Img: X.Xms | SLAM: X.Xms | Full: X.Xms
+        // -------------------------------------------------------------------
+        {
+            const bool is_realtime = (ttrack < T);
+            std::cout << std::fixed << std::setprecision(1)
+                      << "Frame " << ni << ": "
+                      << (is_realtime ? "REAL-TIME" : "DELAYED ")
+                      << "  Img: "  << std::setw(6) << img_ms  << "ms"
+                      << "  SLAM: " << std::setw(6) << slam_ms << "ms"
+                      << "  Full: " << std::setw(6) << full_ms << "ms"
+                      << "  IMU: "  << vImuMeas.size() << "\n";
 
-        // Print real-time status
-        std::cout << "Frame " << ni << ": "
-                  << (ttrack < T ? "REAL-TIME" : "DELAYED")
-                  << " (processing: " << ttrack << "s, target: " << T << "s)\n"
-                  << "IMU measurements between frames: " << vImuMeas.size() << std::endl;
+            if(ni % 50 == 0 || ni == nImages - 1) {
+                // Rolling window: last 50 frames (or all frames if fewer)
+                int win_start = std::max(0, (int)timingLogs.size() - 50);
+                int win_size  = (int)timingLogs.size() - win_start;
+                double avg_img  = 0, avg_slam = 0, avg_full = 0;
+                for(int k = win_start; k < (int)timingLogs.size(); ++k) {
+                    avg_img  += timingLogs[k].img_ms;
+                    avg_slam += timingLogs[k].slam_ms;
+                    avg_full += timingLogs[k].full_ms;
+                }
+                avg_img  /= win_size;
+                avg_slam /= win_size;
+                avg_full /= win_size;
+
+                std::cout << "[Progress] Frame " << ni << "/" << nImages
+                          << " | Img: "  << std::setprecision(1) << avg_img  << "ms"
+                          << " | SLAM: " << avg_slam << "ms"
+                          << " | Full: " << avg_full << "ms"
+                          << " (" << win_size << "-frame avg)\n";
+            }
+        }
     }
+
+    producerThread.join(); // wait for the producer to finish cleanly
 
     if (!current_segment.empty()) {
         trajectory_segments.push_back(current_segment);
