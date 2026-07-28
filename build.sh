@@ -25,7 +25,8 @@ make -j
 
 cd ../../../
 
+source /opt/ros/humble/setup.bash
 mkdir -p build
 cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j10
+make -j4

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 3.10)
 project(ORB_SLAM3)
 
 IF(NOT CMAKE_BUILD_TYPE)
@@ -12,20 +12,20 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall   -O3")
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -march=native")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native")
 
-# Check C++14 or C++0x support
+# Check C++17 or C++14 support
 include(CheckCXXCompilerFlag)
+CHECK_CXX_COMPILER_FLAG("-std=c++17" COMPILER_SUPPORTS_CXX17)
 CHECK_CXX_COMPILER_FLAG("-std=c++14" COMPILER_SUPPORTS_CXX14)
-CHECK_CXX_COMPILER_FLAG("-std=c++0x" COMPILER_SUPPORTS_CXX0X)
-if(COMPILER_SUPPORTS_CXX14)
+if(COMPILER_SUPPORTS_CXX17)
+   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
+   add_definitions(-DCOMPILEDWITHC17)
+   message(STATUS "Using flag -std=c++17.")
+elseif(COMPILER_SUPPORTS_CXX14)
    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14")
    add_definitions(-DCOMPILEDWITHC14)
    message(STATUS "Using flag -std=c++14.")
-elseif(COMPILER_SUPPORTS_CXX0X)
-   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++0x")
-   add_definitions(-DCOMPILEDWITHC0X)
-   message(STATUS "Using flag -std=c++0x.")
 else()
-   message(FATAL_ERROR "The compiler ${CMAKE_CXX_COMPILER} has no C++11 support. Please use a different C++ compiler.")
+   message(FATAL_ERROR "The compiler ${CMAKE_CXX_COMPILER} has no C++14 or C++17 support. Please use a different C++ compiler.")
 endif()
 
 LIST(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake_modules)
@@ -99,3 +99,27 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/Stereo-Inertia
 add_executable(stereo_inertial_fomo
         Examples/Stereo-Inertial/stereo_inertial_fomo.cc)
 target_link_libraries(stereo_inertial_fomo ${PROJECT_NAME})
+
+# Build the ROS 2 rosbag reader example if ROS 2 is available
+find_package(rclcpp)
+if (rclcpp_FOUND)
+    find_package(rosbag2_cpp REQUIRED)
+    find_package(rosbag2_storage REQUIRED)
+    find_package(sensor_msgs REQUIRED)
+    find_package(cv_bridge REQUIRED)
+    
+    add_executable(stereo_inertial_fomo_ros
+            Examples/Stereo-Inertial/stereo_inertial_fomo_ros.cc)
+            
+    target_link_libraries(stereo_inertial_fomo_ros
+        ${PROJECT_NAME}
+        rclcpp::rclcpp
+        rosbag2_cpp::rosbag2_cpp
+        rosbag2_storage::rosbag2_storage
+        sensor_msgs::sensor_msgs__rosidl_generator_c
+        sensor_msgs::sensor_msgs__rosidl_typesupport_cpp
+        cv_bridge::cv_bridge
+    )
+else()
+    message(WARNING "rclcpp not found, stereo_inertial_fomo_ros will not be built.")
+endif()

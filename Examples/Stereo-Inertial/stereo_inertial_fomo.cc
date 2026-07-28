@@ -121,8 +121,22 @@ int main(int argc, char **argv)
 {
     if(argc < 5)
     {
-        cerr << endl << "Usage: ./stereo_inertial_fomo path_to_vocabulary path_to_settings path_to_sequence_folder output_trajectory_path [time_offset_seconds]" << endl;
+        cerr << endl << "Usage: ./stereo_inertial_fomo path_to_vocabulary path_to_settings path_to_sequence_folder output_trajectory_path [time_offset_seconds] [--realtime]" << endl;
         return 1;
+    }
+
+    // Scan argv for the optional --realtime flag (position-independent).
+    // When active, the main loop enforces the camera's temporal budget by dropping
+    // frames that arrive too late to be processed on time -- mirroring the implicit
+    // drop strategy of the ROS2 stereo-inertial node (size-1 image buffers).
+    bool bRealTime = false;
+    // Also collect the optional numeric time_offset argument: any positional argv
+    // entry at index >= 5 that does NOT start with '--'.
+    std::string sTimeOffset = "";
+    for(int i = 1; i < argc; ++i) {
+        std::string arg(argv[i]);
+        if(arg == "--realtime")      bRealTime = true;
+        else if(i >= 5 && arg.substr(0, 2) != "--") sTimeOffset = arg;
     }
 
     // Load sequence
@@ -185,10 +199,10 @@ int main(int argc, char **argv)
             // offset such that: vTimestampsCam[0] + offset = atlas_min_ts - kAtlasMarginSec
             double auto_offset = atlas_min_ts - kAtlasMarginSec - vTimestampsCam[0];
 
-            if(argc >= 6)
+            if(!sTimeOffset.empty())
             {
                 // CLI argument is treated as an explicit override; warn if it differs significantly.
-                double cli_offset = stod(argv[5]);
+                double cli_offset = stod(sTimeOffset);
                 double diff = std::abs(cli_offset - auto_offset);
                 if(diff > 10.0)
                     cerr << "WARNING: CLI time_offset (" << cli_offset
@@ -208,9 +222,9 @@ int main(int argc, char **argv)
         else
         {
             // No atlas loaded (pure mapping mode) – fall back to CLI argument if provided.
-            if(argc >= 6)
+            if(!sTimeOffset.empty())
             {
-                time_offset = stod(argv[5]);
+                time_offset = stod(sTimeOffset);
                 cout << "No atlas loaded. Applying CLI time offset: " << time_offset << " s" << endl;
             }
         }
@@ -272,6 +286,33 @@ int main(int argc, char **argv)
     timingLogs.reserve(nImages);
 
     // -----------------------------------------------------------------------
+    // Real-time enforcement state
+    //
+    // Mirrors the ROS2 stereo-inertial node's implicit frame-drop strategy:
+    //   GrabImageLeft() keeps only the most recent frame (size-1 buffer).
+    //   Any frame that arrives while TrackStereo() is running is silently dropped.
+    //
+    // Here we emulate this with an explicit sequence clock:
+    //   t_rt_start is anchored to the wall-clock moment frame 0 begins.
+    //   For each frame ni, its ideal wall-clock deadline is:
+    //     deadline(ni) = t_rt_start + (vTimestampsCam[ni] - vTimestampsCam[0])
+    //   If now > deadline + 0.5*frame_period → drop the frame.
+    // -----------------------------------------------------------------------
+    std::chrono::steady_clock::time_point t_rt_start;  // set on first iteration
+    bool t_rt_initialized = false;
+    int  frames_dropped   = 0;
+
+    if(bRealTime) {
+        double fps = (nImages > 1)
+            ? 1.0 / (vTimestampsCam[1] - vTimestampsCam[0])
+            : 10.0;
+        std::cout << "[RealTime] Frame-drop mode ENABLED. "
+                  << "Budget: " << std::fixed << std::setprecision(1)
+                  << (1000.0 / fps) << "ms/frame @ "
+                  << std::setprecision(1) << fps << " Hz\n";
+    }
+
+    // -----------------------------------------------------------------------
     // Image pre-loading pipeline
     //
     // A producer thread submits (left, right) image-load tasks to a thread
@@ -309,14 +350,60 @@ int main(int argc, char **argv)
         auto t_frame_start = std::chrono::steady_clock::now();
 
         // -------------------------------------------------------------------
+        // Anchor the sequence clock on frame 0.
+        // We do this here (not before the loop) so the clock starts after
+        // atlas loading is complete, not during it.
+        // -------------------------------------------------------------------
+        if(!t_rt_initialized) {
+            t_rt_start = t_frame_start;
+            t_rt_initialized = true;
+        }
+
+        // -------------------------------------------------------------------
         // Stage 1: image load
-        // Dequeue the pre-loading future for this frame and wait for the
-        // images to be ready.  In the common case the future is already
-        // resolved because disk I/O finished while the previous frame was
-        // being tracked.
+        // Always pop the image future from the queue to keep the producer
+        // thread in sync. The future is resolved only if we decide not to
+        // drop this frame.
         // -------------------------------------------------------------------
         auto [qni, imgFuture] = imageQueue.get();
         assert(qni == ni && "Image queue frame index mismatch");
+
+        // -------------------------------------------------------------------
+        // [--realtime] Frame-drop check
+        //
+        // Compute how far we are behind the ideal sequence-clock deadline.
+        // If we are more than half a frame-period late, drop this frame:
+        //   - advance the IMU cursor past this frame's timestamp so the
+        //     next processed frame receives the full accumulated IMU batch
+        //     (same as the ROS2 node's imuBuf_ accumulating during a drop)
+        //   - let imgFuture go out of scope → destructor waits for the
+        //     background imread task to finish (no resource leak)
+        // -------------------------------------------------------------------
+        if(bRealTime) {
+            double t_cam_elapsed  = vTimestampsCam[ni] - vTimestampsCam[0];
+            double t_wall_elapsed = std::chrono::duration<double>(
+                t_frame_start - t_rt_start).count();
+            double frame_period   = (ni < nImages - 1)
+                ? (vTimestampsCam[ni+1] - vTimestampsCam[ni])
+                : (1.0 / 10.0);
+            double behind_ms = (t_wall_elapsed - t_cam_elapsed) * 1000.0;
+
+            if(behind_ms > 0.5 * frame_period * 1000.0) {
+                // Advance the IMU cursor past this frame's timestamp so the
+                // next processed frame gets the full spanning IMU batch.
+                while(first_imu < (int)vTimestampsImu.size() &&
+                      vTimestampsImu[first_imu] <= vTimestampsCam[ni])
+                    first_imu++;
+
+                frames_dropped++;
+                std::cout << std::fixed << std::setprecision(1)
+                          << "Frame " << ni << ": SKIPPED   ("
+                          << behind_ms << "ms behind schedule)\n";
+                continue; // imgFuture destructor releases the async imread task
+            }
+        }
+
+        // Resolve the future (blocks if the background imread isn't done yet)
         auto [imLeftLoaded, imRightLoaded] = imgFuture.get();
         imLeft  = imLeftLoaded;
         imRight = imRightLoaded;
@@ -440,7 +527,10 @@ int main(int argc, char **argv)
         else if(ni>0)
             T = tframe-vTimestampsCam[ni-1];
 
-        if(ttrack<T)
+        // In --realtime mode: skip the sleep entirely so any saved margin is
+        // immediately available to the next frame (mirrors the ROS2 SyncWithImu
+        // loop which re-enters immediately after TrackStereo returns).
+        if(!bRealTime && ttrack < T)
             usleep((T-ttrack)*1e6);
 
         // -------------------------------------------------------------------
@@ -456,7 +546,7 @@ int main(int argc, char **argv)
             const bool is_realtime = (ttrack < T);
             std::cout << std::fixed << std::setprecision(1)
                       << "Frame " << ni << ": "
-                      << (is_realtime ? "REAL-TIME" : "DELAYED ")
+                      << (is_realtime ? "REAL-TIME" : "DELAYED  ")
                       << "  Img: "  << std::setw(6) << img_ms  << "ms"
                       << "  SLAM: " << std::setw(6) << slam_ms << "ms"
                       << "  Full: " << std::setw(6) << full_ms << "ms"
@@ -480,6 +570,7 @@ int main(int argc, char **argv)
                           << " | Img: "  << std::setprecision(1) << avg_img  << "ms"
                           << " | SLAM: " << avg_slam << "ms"
                           << " | Full: " << avg_full << "ms"
+                          << " | Dropped: " << frames_dropped
                           << " (" << win_size << "-frame avg)\n";
             }
         }

@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/devcontainers/cpp:ubuntu-22.04
+FROM osrf/ros:humble-desktop
 
 # Install additional packages
 RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
@@ -28,6 +28,8 @@ RUN git clone --recursive https://github.com/stevenlovegrove/Pangolin.git && \
     git submodule update --init --recursive && \
     mkdir build && cd build && \
     cmake .. -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_PANGOLIN_PYTHON=OFF \
+    -DBUILD_PYPANGOLIN_MODULE=OFF \
     -DCMAKE_CXX_FLAGS="-Wno-error=type-limits -Wno-type-limits" && \
     make -j$(nproc) && \
     make install
