@@ -375,6 +375,17 @@ int main(int argc, char **argv)
 
     odomFile.close();
 
+    std::ofstream firstOdomFile(strOutName + "_first_bak");
+    firstOdomFile << fixed;
+    if (!trajectory_segments.empty()) {
+        for (const auto& pt : trajectory_segments[0]) {
+            firstOdomFile << setprecision(6) << pt.t << " "
+                          << setprecision(9) << pt.twb(0) << " " << pt.twb(1) << " " << pt.twb(2) << " "
+                          << pt.q.x() << " " << pt.q.y() << " " << pt.q.z() << " " << pt.q.w() << "\n";
+        }
+    }
+    firstOdomFile.close();
+
     // --- Atlas integrity check & pointcloud export ---
     {
         ORB_SLAM3::Atlas* atlas = SLAM.GetAtlas();
@@ -421,6 +432,7 @@ int main(int argc, char **argv)
     {
         cout << "Correcting timestamps in output files (offset = " << time_offset << " s)..." << endl;
         CorrectTimestamps(strOutName + "_bak", time_offset, 1.0);   
+        CorrectTimestamps(strOutName + "_first_bak", time_offset, 1.0);   
         CorrectTimestamps(strOutName,           time_offset, 1e9);  
         CorrectTimestamps(strOutName + "_kf",   time_offset, 1e9);  
         cout << "Timestamp correction done." << endl;
