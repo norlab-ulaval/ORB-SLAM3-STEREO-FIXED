@@ -29,7 +29,7 @@
 #include <rosbag2_storage/storage_filter.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/imu.hpp>
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 
 using namespace std;
 
@@ -67,17 +67,23 @@ int main(int argc, char **argv)
 {
     if(argc < 5)
     {
-        cerr << endl << "Usage: ./stereo_inertial_fomo_ros path_to_vocabulary path_to_settings path_to_rosbag output_trajectory_path [time_offset_seconds] [--realtime]" << endl;
+        cerr << endl << "Usage: ./stereo_inertial_fomo_ros path_to_vocabulary path_to_settings path_to_rosbag output_trajectory_path [time_offset_seconds] [--realtime] [--no-imu]" << endl;
         return 1;
     }
 
-    // Scan argv for the optional --realtime flag (position-independent).
+    // Scan argv for optional flags (position-independent).
     bool bRealTime = false;
+    bool bUseImu = true;
     std::string sTimeOffset = "";
     for(int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
         if(arg == "--realtime")      bRealTime = true;
+        else if(arg == "--no-imu")   bUseImu = false;
         else if(i >= 5 && arg.substr(0, 2) != "--") sTimeOffset = arg;
+    }
+
+    if (bRealTime) {
+        cout << "Running realtime\n";
     }
 
     string pathBag(argv[3]);
@@ -102,7 +108,9 @@ int main(int argc, char **argv)
     }
 
     rosbag2_storage::StorageFilter filter;
-    filter.topics.push_back("/vectornav/data_raw");
+    if (bUseImu) {
+        filter.topics.push_back("/vectornav/data_raw");
+    }
     filter.topics.push_back("/zedx/left/image_rect");
     filter.topics.push_back("/zedx/right/image_rect");
     reader.set_filter(filter);
@@ -111,7 +119,8 @@ int main(int argc, char **argv)
     rclcpp::Serialization<sensor_msgs::msg::Image> image_serialization;
 
     // Create SLAM system first so we can read the atlas timestamps before deciding the offset.
-    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::IMU_STEREO, true);
+    ORB_SLAM3::System::eSensor sensorType = bUseImu ? ORB_SLAM3::System::IMU_STEREO : ORB_SLAM3::System::STEREO;
+    ORB_SLAM3::System SLAM(argv[1],argv[2],sensorType, false); // last param is visualization
 
     const double kAtlasMarginSec = 5.0; // seconds before the first atlas KF
     double time_offset = 0.0;
@@ -134,6 +143,7 @@ int main(int argc, char **argv)
 
     if(bRealTime) {
         std::cout << "[RealTime] Frame-drop mode ENABLED. "
+                  << "Will start in offline mode until first localization.\n"
                   << "Budget: 100.0ms/frame @ 10.0 Hz\n";
     }
 
@@ -155,8 +165,8 @@ int main(int argc, char **argv)
     };
     std::vector<TimingLog> timingLogs;
 
-    std::chrono::steady_clock::time_point t_rt_start;
-    bool t_rt_initialized = false;
+    std::chrono::steady_clock::time_point rt_wall_start;
+    double rt_cam_start_ts = 0.0;
     int  frames_dropped   = 0;
     int  ni               = 0;
 
@@ -246,14 +256,9 @@ int main(int argc, char **argv)
                     double tframe = tLeft;
                     auto t_frame_start = std::chrono::steady_clock::now();
 
-                    if(!t_rt_initialized) {
-                        t_rt_start = t_frame_start;
-                        t_rt_initialized = true;
-                    }
-
-                    if(bRealTime) {
-                        double t_cam_elapsed  = tframe - (first_cam_ts + time_offset);
-                        double t_wall_elapsed = std::chrono::duration<double>(t_frame_start - t_rt_start).count();
+                    if(bRealTime && bHasLocalized) {
+                        double t_cam_elapsed  = tframe - rt_cam_start_ts;
+                        double t_wall_elapsed = std::chrono::duration<double>(t_frame_start - rt_wall_start).count();
                         double frame_period   = 0.1; // 10 Hz from fomo.yaml
                         double behind_ms = (t_wall_elapsed - t_cam_elapsed) * 1000.0;
 
@@ -269,7 +274,7 @@ int main(int argc, char **argv)
                         }
                     }
 
-                    if(!bImuExcited) {
+                    if(bUseImu && !bImuExcited) {
                         for(size_t i=0; i<vImuMeas.size(); i++) {
                             if (vImuMeas[i].w.norm() > 0.1 || std::abs(vImuMeas[i].a.norm() - 9.81) > 0.5) {
                                 bImuExcited = true;
@@ -281,7 +286,12 @@ int main(int argc, char **argv)
 
                     auto t_slam_start = std::chrono::steady_clock::now();
                     size_t num_imu = vImuMeas.size();
-                    Sophus::SE3f Tcw = SLAM.TrackStereo(imLeft, imRight, tframe, vImuMeas);
+                    Sophus::SE3f Tcw;
+                    if (bUseImu) {
+                        Tcw = SLAM.TrackStereo(imLeft, imRight, tframe, vImuMeas);
+                    } else {
+                        Tcw = SLAM.TrackStereo(imLeft, imRight, tframe);
+                    }
                     auto t_slam_end = std::chrono::steady_clock::now();
                     double slam_ms = std::chrono::duration<double,std::milli>(t_slam_end - t_slam_start).count();
 
@@ -295,7 +305,14 @@ int main(int argc, char **argv)
                             trajectory_segments.push_back(current_segment);
                             current_segment.clear();
                         }
-                        bHasLocalized = true;
+                        if (!bHasLocalized) {
+                            bHasLocalized = true;
+                            if (bRealTime) {
+                                std::cout << "First localization event triggered at frame " << ni << ". Switching to realtime mode.\n";
+                                rt_cam_start_ts = tframe;
+                                rt_wall_start = std::chrono::steady_clock::now();
+                            }
+                        }
                         tLost = -1.0; 
                         Sophus::SE3f Twb = (Tbc * Tcw).inverse();
                         TrajectoryPoint pt;
