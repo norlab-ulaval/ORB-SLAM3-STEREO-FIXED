@@ -177,6 +177,12 @@ public:
     std::vector<MapPoint*> GetTrackedMapPoints();
     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
 
+    // Features matched in the last processed frame, split the same way the
+    // frame viewer colours them: nTrackedMap counts matches to points already
+    // in the map (green), nTrackedVO counts "visual odometry" points created
+    // from the last frame and not yet observed elsewhere (blue).
+    void GetTrackedFeatureCounts(int &nTrackedMap, int &nTrackedVO);
+
     // For debugging
     double GetTimeFromIMUInit();
     bool isLost();
@@ -254,7 +260,13 @@ private:
     int mTrackingState;
     std::vector<MapPoint*> mTrackedMapPoints;
     std::vector<cv::KeyPoint> mTrackedKeyPointsUn;
+    int mnTrackedMap;
+    int mnTrackedVO;
     std::mutex mMutexState;
+
+    // Recount mnTrackedMap/mnTrackedVO from the tracker's current frame.
+    // Call with mMutexState held.
+    void UpdateTrackedFeatureCounts();
 
     //
     string mStrLoadAtlasFromFile;

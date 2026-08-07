@@ -12,6 +12,10 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall   -O3")
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -march=native")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native")
 
+# # Enable per-stage tracking/local-mapping timing instrumentation (writes
+# # TrackingTimeStats.txt / LocalMapTimeStats.txt / ExecMean.txt on Shutdown()).
+# add_definitions(-DREGISTER_TIMES)
+
 # Check C++17 or C++14 support
 include(CheckCXXCompilerFlag)
 CHECK_CXX_COMPILER_FLAG("-std=c++17" COMPILER_SUPPORTS_CXX17)
@@ -107,10 +111,10 @@ if (rclcpp_FOUND)
     find_package(rosbag2_storage REQUIRED)
     find_package(sensor_msgs REQUIRED)
     find_package(cv_bridge REQUIRED)
-    
+
     add_executable(stereo_inertial_fomo_ros
             Examples/Stereo-Inertial/stereo_inertial_fomo_ros.cc)
-            
+
     target_link_libraries(stereo_inertial_fomo_ros
         ${PROJECT_NAME}
         rclcpp::rclcpp

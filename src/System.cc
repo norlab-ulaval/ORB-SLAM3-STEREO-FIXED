@@ -41,7 +41,8 @@ Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
 System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
                const bool bUseViewer, const int initFr, const string &strSequence):
     mSensor(sensor), mpViewer(static_cast<Viewer*>(NULL)), mbReset(false), mbResetActiveMap(false),
-    mbActivateLocalizationMode(false), mbDeactivateLocalizationMode(false), mbShutDown(false)
+    mbActivateLocalizationMode(false), mbDeactivateLocalizationMode(false), mbShutDown(false),
+    mnTrackedMap(0), mnTrackedVO(0)
 {
     // Output welcome message
     cout << endl <<
@@ -385,6 +386,7 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, 
     mTrackingState = mpTracker->mState;
     mTrackedMapPoints = mpTracker->mCurrentFrame.mvpMapPoints;
     mTrackedKeyPointsUn = mpTracker->mCurrentFrame.mvKeysUn;
+    UpdateTrackedFeatureCounts();
 
     return Tcw;
 }
@@ -457,6 +459,7 @@ Sophus::SE3f System::TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const
     mTrackingState = mpTracker->mState;
     mTrackedMapPoints = mpTracker->mCurrentFrame.mvpMapPoints;
     mTrackedKeyPointsUn = mpTracker->mCurrentFrame.mvKeysUn;
+    UpdateTrackedFeatureCounts();
     return Tcw;
 }
 
@@ -533,6 +536,7 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
     mTrackingState = mpTracker->mState;
     mTrackedMapPoints = mpTracker->mCurrentFrame.mvpMapPoints;
     mTrackedKeyPointsUn = mpTracker->mCurrentFrame.mvKeysUn;
+    UpdateTrackedFeatureCounts();
 
     return Tcw;
 }
@@ -587,16 +591,18 @@ void System::Shutdown()
 
     mpLocalMapper->RequestFinish();
     mpLoopCloser->RequestFinish();
-    /*if(mpViewer)
+    if(mpViewer)
     {
         mpViewer->RequestFinish();
         while(!mpViewer->isFinished())
             usleep(5000);
-    }*/
+    }
 
     // Wait until all threads have effectively stopped.
-    // Without this, LocalMapping/LoopClosing may still be modifying the atlas
-    // when the caller reads it, causing heap corruption (malloc double-linked list error).
+    // Without this, LocalMapping/LoopClosing (and the Viewer, which keeps
+    // rendering the map on its own thread) may still be reading/modifying the
+    // atlas when the caller saves it, causing heap corruption (malloc
+    // double-linked list error).
     while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished())
     {
         usleep(5000);
@@ -1380,6 +1386,35 @@ int System::GetTrackingState()
 {
     unique_lock<mutex> lock(mMutexState);
     return mTrackingState;
+}
+
+void System::UpdateTrackedFeatureCounts()
+{
+    // Same classification the frame viewer draws: a match to a point already
+    // in the map is green, a "visual odometry" point created from the last
+    // frame (no observations yet) is blue. Outliers are drawn as neither.
+    mnTrackedMap = 0;
+    mnTrackedVO = 0;
+
+    const Frame &F = mpTracker->mCurrentFrame;
+    for(int i=0; i<F.N; i++)
+    {
+        MapPoint* pMP = F.mvpMapPoints[i];
+        if(!pMP || F.mvbOutlier[i])
+            continue;
+
+        if(pMP->Observations()>0)
+            mnTrackedMap++;
+        else
+            mnTrackedVO++;
+    }
+}
+
+void System::GetTrackedFeatureCounts(int &nTrackedMap, int &nTrackedVO)
+{
+    unique_lock<mutex> lock(mMutexState);
+    nTrackedMap = mnTrackedMap;
+    nTrackedVO = mnTrackedVO;
 }
 
 vector<MapPoint*> System::GetTrackedMapPoints()

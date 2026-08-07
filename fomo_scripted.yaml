@@ -1,8 +1,9 @@
 %YAML:1.0
 
 Atlas: true
-System.LoadAtlasFromFile: "/workspaces/ORB-SLAM3-STEREO-FIXED/data/red_2025-06-26-10-31/atlas"
-System.LocalizationMode: true
+System.LoadAtlasFromFile: "/workspaces/ORB-SLAM3-STEREO-FIXED/data/orange_2025-06-26-10-48/atlas"
+System.LocalizationMode: 1
+# System.SaveAtlasToFile: "/tmp/t"
 
 
 #--------------------------------------------------------------------------------------------
@@ -63,7 +64,7 @@ Camera.fps: 10.0
 Camera.RGB: 1
 
 # Image scale, it changes the image size to be processed (<1.0: reduce, >1.0: increase)
-Camera.imageScale: 1.0 # 1/sqrt(2)
+Camera.imageScale: 1.0
 
 # Close/Far threshold. Baseline times.
 ThDepth: 120.0

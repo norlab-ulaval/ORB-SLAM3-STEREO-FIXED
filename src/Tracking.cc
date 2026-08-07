@@ -98,6 +98,46 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     mbInitWith3KFs = false;
     mnNumDataset = 0;
 
+    // Pose-prior relocalization. Note these must be written as ints in the
+    // YAML: cv::FileStorage parses bare true/false as strings, not bools.
+    mbPriorReloc = true;
+    mbPriorRelocDone = false;
+    mnPriorRelocMinInliers = 25;
+    // Same excitation test the examples use to decide the platform has started
+    // moving: no appreciable rotation, and specific force still just gravity.
+    mbZeroMotionClamp = true;
+    mbImuExcitedOnce = false;
+    mfStationaryGyroTh = 0.1f;   // rad/s
+    mfStationaryAccTh = 0.5f;    // m/s^2 away from |g|
+    {
+        cv::FileStorage fSettings(strSettingPath, cv::FileStorage::READ);
+        cv::FileNode node = fSettings["System.PriorRelocalization"];
+        if(!node.empty() && node.isInt())
+            mbPriorReloc = (bool) node.operator int();
+
+        node = fSettings["System.PriorRelocalizationMinInliers"];
+        if(!node.empty() && node.isInt())
+            mnPriorRelocMinInliers = node.operator int();
+
+        node = fSettings["System.ZeroMotionClamp"];
+        if(!node.empty() && node.isInt())
+            mbZeroMotionClamp = (bool) node.operator int();
+
+        node = fSettings["System.StationaryGyroTh"];
+        if(!node.empty() && (node.isReal() || node.isInt()))
+            mfStationaryGyroTh = (float) node.real();
+
+        node = fSettings["System.StationaryAccTh"];
+        if(!node.empty() && (node.isReal() || node.isInt()))
+            mfStationaryAccTh = (float) node.real();
+    }
+    if(mbPriorReloc)
+        cout << "Pose-prior relocalization enabled (min inliers: "
+             << mnPriorRelocMinInliers << ")" << endl;
+    if(mbZeroMotionClamp)
+        cout << "Zero-motion clamp enabled (gyro < " << mfStationaryGyroTh
+             << " rad/s, |acc|-g < " << mfStationaryAccTh << " m/s^2)" << endl;
+
     vector<GeometricCamera*> vpCams = mpAtlas->GetAllCameras();
     std::cout << "There are " << vpCams.size() << " cameras in the atlas" << std::endl;
     for(GeometricCamera* pCam : vpCams)
@@ -1831,18 +1871,21 @@ void Tracking::Track()
             // cout << "id last: " << mLastFrame.mnId << "    id curr: " << mCurrentFrame.mnId << endl;
 
             // In localization mode we must NOT reset or create a new map on a timestamp
-            // gap – the loaded atlas is the only reference we have.  Let the normal
-            // LOST → Relocalization path handle recovery instead.
+            // gap – the loaded atlas is the only reference we have.
             if(mbOnlyTracking)
             {
-                // In localization mode never destroy the loaded atlas.
-                // Just clear stale IMU data and fall through to the normal
-                // LOST → Relocalization path below.
-                cout << "Timestamp jump detected in localization mode. Clearing IMU queue and attempting relocalization." << endl;
-                mState = LOST;
-                unique_lock<mutex> lock(mMutexImuQueue);
-                mlQueueImuData.clear();
-                // Do NOT return – fall through so Relocalization() is called.
+                // A timestamp gap here typically just means the real-time scheduler
+                // skipped some frames to catch up; it does not mean we lost track of
+                // where we are. The IMU queue keeps accumulating across skipped
+                // frames (the caller only clears it once measurements are actually
+                // consumed), so it still holds a continuous stream bridging the gap.
+                // Leave mState and the IMU queue alone and let normal tracking
+                // (IMU-based motion prediction via TrackWithMotionModel) resume
+                // through the gap; it will fall back to full Relocalization() on
+                // its own only if that genuinely fails.
+                cout << "Timestamp jump detected in localization mode ("
+                     << (mCurrentFrame.mTimeStamp - mLastFrame.mTimeStamp)
+                     << "s gap). Resuming tracking without forcing relocalization." << endl;
             }
             else if(mpAtlas->isInertial())
             {
@@ -2059,7 +2102,24 @@ void Tracking::Track()
             {
                 if(mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
                     Verbose::PrintMess("IMU. State LOST", Verbose::VERBOSITY_NORMAL);
-                bOK = Relocalization();
+
+                bOK = false;
+
+                // Until the first fix of the session we know roughly where we
+                // are (same start position as the mapping session), so seed the
+                // pose from the map rather than querying the whole keyframe
+                // database by appearance. Appearance-based retrieval is what
+                // breaks when the scene has changed (e.g. a different season);
+                // matching under a pose prior is far more tolerant of it.
+                if(mbPriorReloc && !mbPriorRelocDone)
+                {
+                    bOK = RelocalizationFromPrior();
+                    if(bOK)
+                        mbPriorRelocDone = true;
+                }
+
+                if(!bOK)
+                    bOK = Relocalization();
             }
             else
             {
@@ -2072,7 +2132,16 @@ void Tracking::Track()
                     }
                     else
                     {
-                        bOK = TrackReferenceKeyFrame();
+                        // No motion model yet: this is the frame right after a
+                        // relocalization. Bridge with projection matching
+                        // against the last frame first, because falling
+                        // straight into TrackReferenceKeyFrame() would put us
+                        // back on bag-of-words matching (at an even stricter
+                        // 0.7 ratio) -- exactly what fails when the scene no
+                        // longer looks like the map. Keep it as a fallback.
+                        bOK = TrackFromLastFramePrior();
+                        if(!bOK)
+                            bOK = TrackReferenceKeyFrame();
                     }
                 }
                 else
@@ -2209,6 +2278,18 @@ void Tracking::Track()
         double timeLMTrack = std::chrono::duration_cast<std::chrono::duration<double,std::milli> >(time_EndLMTrack - time_StartLMTrack).count();
         vdLMTrack_ms.push_back(timeLMTrack);
 #endif
+
+        // Zero-motion clamp. While the IMU says we are standing still, do not
+        // let the visual estimate wander: with few or noisy map matches the
+        // pose optimizer will happily drift, and that drift then seeds the
+        // next frame. Holding the pose until there is real motion keeps the
+        // start of the session pinned where the relocalization put it.
+        if(mbZeroMotionClamp && mbOnlyTracking && bOK && mLastFrame.isSet() && IsStationaryFromIMU())
+        {
+            mCurrentFrame.SetPose(mLastFrame.GetPose());
+            if(mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+                mCurrentFrame.SetVelocity(Eigen::Vector3f::Zero());
+        }
 
         // Update drawer
         mpFrameDrawer->Update(this);
@@ -3794,6 +3875,199 @@ bool Tracking::Relocalization()
         return true;
     }
 
+}
+
+bool Tracking::RelocalizationFromPrior()
+{
+    Map* pCurrentMap = mpAtlas->GetCurrentMap();
+    if(!pCurrentMap)
+        return false;
+
+    // Seed on the earliest keyframe of the loaded map: we assume this session
+    // starts from the same place the mapping session did.
+    KeyFrame* pSeedKF = static_cast<KeyFrame*>(NULL);
+    for(KeyFrame* pKF : pCurrentMap->GetAllKeyFrames())
+    {
+        if(!pKF || pKF->isBad())
+            continue;
+        if(!pSeedKF || pKF->mTimeStamp < pSeedKF->mTimeStamp)
+            pSeedKF = pKF;
+    }
+
+    if(!pSeedKF)
+        return false;
+
+    // Candidate map points: those seen from the seed KF and its neighbours.
+    vector<KeyFrame*> vpKFs = pSeedKF->GetBestCovisibilityKeyFrames(10);
+    vpKFs.push_back(pSeedKF);
+
+    vector<MapPoint*> vpMapPoints;
+    set<MapPoint*> spFound;
+    for(KeyFrame* pKF : vpKFs)
+    {
+        if(!pKF || pKF->isBad())
+            continue;
+        for(MapPoint* pMP : pKF->GetMapPointMatches())
+        {
+            if(!pMP || pMP->isBad() || spFound.count(pMP))
+                continue;
+            spFound.insert(pMP);
+            vpMapPoints.push_back(pMP);
+        }
+    }
+
+    if(vpMapPoints.empty())
+        return false;
+
+    const Sophus::SE3f priorPose = pSeedKF->GetPose();
+
+    // Widening search windows. The pose prior is what lets us afford such a
+    // coarse search without the match count exploding, and the coarse pass is
+    // what recovers points whose appearance has drifted since mapping.
+    const float thSearch[3] = {5.0f, 10.0f, 15.0f};
+
+    for(int attempt=0; attempt<3; attempt++)
+    {
+        mCurrentFrame.SetPose(priorPose);
+        fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
+
+        // Project the candidates under the prior pose (fills the per-MapPoint
+        // tracking fields that SearchByProjection consumes).
+        int nToMatch = 0;
+        for(MapPoint* pMP : vpMapPoints)
+        {
+            pMP->mbTrackInView = false;
+            pMP->mbTrackInViewR = false;
+            if(mCurrentFrame.isInFrustum(pMP,0.5))
+                nToMatch++;
+        }
+
+        if(nToMatch==0)
+            continue;
+
+        // Loose ratio test: descriptor distances are larger across sessions.
+        ORBmatcher matcher(0.9,true);
+        int nmatches = matcher.SearchByProjection(mCurrentFrame,vpMapPoints,thSearch[attempt]);
+
+        if(nmatches<mnPriorRelocMinInliers)
+            continue;
+
+        int nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+
+        for(int i=0; i<mCurrentFrame.N; i++)
+            if(mCurrentFrame.mvbOutlier[i])
+                mCurrentFrame.mvpMapPoints[i]=static_cast<MapPoint*>(NULL);
+
+        if(nGood>=mnPriorRelocMinInliers)
+        {
+            mCurrentFrame.mpReferenceKF = pSeedKF;
+            mpReferenceKF = pSeedKF;
+            mnLastRelocFrameId = mCurrentFrame.mnId;
+            cout << "Relocalized from prior pose (seed KF " << pSeedKF->mnId
+                 << ", " << nGood << " inliers, search window " << thSearch[attempt]
+                 << ")" << endl;
+            return true;
+        }
+
+        cout << "Prior relocalization: " << nmatches << " matches, " << nGood
+             << " inliers at search window " << thSearch[attempt]
+             << " (need " << mnPriorRelocMinInliers << ")" << endl;
+    }
+
+    return false;
+}
+
+bool Tracking::IsStationaryFromIMU()
+{
+    // An accelerometer measures specific force, which is identical at rest and
+    // in constant-velocity motion. So this test can only tell us that the
+    // platform has *not started moving yet*: once it has been excited even
+    // once, we must never claim stationarity again, or a smooth constant-speed
+    // stretch would be mistaken for a standstill and freeze the pose.
+    if(mbImuExcitedOnce)
+        return false;
+
+    if(mSensor != System::IMU_MONOCULAR && mSensor != System::IMU_STEREO && mSensor != System::IMU_RGBD)
+        return false;
+
+    IMU::Preintegrated* pImuPre = mCurrentFrame.mpImuPreintegratedFrame;
+    if(!pImuPre || pImuPre->dT <= 0.f)
+        return false;   // no measurements yet: unknown, and not grounds to latch
+
+    const bool bStationary = pImuPre->avgW.norm() < mfStationaryGyroTh &&
+                             fabs(pImuPre->avgA.norm() - IMU::GRAVITY_VALUE) < mfStationaryAccTh;
+
+    if(!bStationary)
+    {
+        mbImuExcitedOnce = true;
+        cout << "IMU excitation detected at frame " << mCurrentFrame.mnId
+             << ": zero-motion clamp released for the rest of the session." << endl;
+    }
+
+    return bStationary;
+}
+
+bool Tracking::TrackFromLastFramePrior()
+{
+    if(!mLastFrame.isSet())
+        return false;
+
+    UpdateLastFrame();
+
+    // No motion model yet, so assume the camera has barely moved since the
+    // last frame. The seed only has to be close enough for the projection
+    // search below to find its matches -- which is the point of this path:
+    // matching by projection tolerates appearance change far better than the
+    // bag-of-words matching TrackReferenceKeyFrame() would do here.
+    mCurrentFrame.SetPose(mLastFrame.GetPose());
+
+    fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
+
+    const bool bMono = (mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR);
+
+    // Wider window than TrackWithMotionModel(): without a velocity estimate
+    // the constant-position seed is coarser, so give the search more room.
+    int th = bMono ? 30 : 15;
+
+    ORBmatcher matcher(0.9,true);
+    int nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,th,bMono);
+
+    if(nmatches<20)
+    {
+        fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
+        nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,2*th,bMono);
+    }
+
+    if(nmatches<20)
+        return false;
+
+    Optimizer::PoseOptimization(&mCurrentFrame);
+
+    // Discard outliers
+    int nmatchesMap = 0;
+    for(int i=0; i<mCurrentFrame.N; i++)
+    {
+        if(mCurrentFrame.mvpMapPoints[i])
+        {
+            if(mCurrentFrame.mvbOutlier[i])
+            {
+                MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
+
+                mCurrentFrame.mvpMapPoints[i]=static_cast<MapPoint*>(NULL);
+                mCurrentFrame.mvbOutlier[i]=false;
+                if(i < mCurrentFrame.Nleft)
+                    pMP->mbTrackInView = false;
+                else
+                    pMP->mbTrackInViewR = false;
+                pMP->mnLastFrameSeen = mCurrentFrame.mnId;
+                nmatches--;
+            }
+            else if(mCurrentFrame.mvpMapPoints[i]->Observations()>0)
+                nmatchesMap++;
+        }
+    }
+
+    return nmatchesMap>=10;
 }
 
 void Tracking::Reset(bool bLocMap)

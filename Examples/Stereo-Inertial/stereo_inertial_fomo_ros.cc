@@ -15,6 +15,7 @@
 #include <thread>
 
 #include <opencv2/core/core.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include <System.h>
 #include "ImuTypes.h"
@@ -29,7 +30,7 @@
 #include <rosbag2_storage/storage_filter.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/imu.hpp>
-#include <cv_bridge/cv_bridge.hpp>
+#include <cv_bridge/cv_bridge.h>
 
 using namespace std;
 
@@ -120,7 +121,7 @@ int main(int argc, char **argv)
 
     // Create SLAM system first so we can read the atlas timestamps before deciding the offset.
     ORB_SLAM3::System::eSensor sensorType = bUseImu ? ORB_SLAM3::System::IMU_STEREO : ORB_SLAM3::System::STEREO;
-    ORB_SLAM3::System SLAM(argv[1],argv[2],sensorType, false); // last param is visualization
+    ORB_SLAM3::System SLAM(argv[1],argv[2],sensorType, true); // last param is visualization
 
     const double kAtlasMarginSec = 5.0; // seconds before the first atlas KF
     double time_offset = 0.0;
@@ -134,6 +135,18 @@ int main(int argc, char **argv)
         cvTbc.convertTo(cvTbc, CV_32F);
     Eigen::Matrix<float,4,4,Eigen::RowMajor> eigTbc(cvTbc.ptr<float>(0));
     Sophus::SE3f Tbc(eigTbc);
+
+    // Tracking only rescales the camera intrinsics by Camera.imageScale; it
+    // never resizes the images itself, so we must physically downscale the
+    // frames here to match, or the intrinsics/pixel-data will disagree.
+    float imageScale = 1.f;
+    {
+        cv::FileNode node = fSettings["Camera.imageScale"];
+        if(!node.empty())
+            imageScale = node.real();
+    }
+    if(imageScale != 1.f)
+        cout << "Resizing input images by a factor of " << imageScale << endl;
 
     std::ofstream odomFile(strOutName + "_bak");
     odomFile << fixed;
@@ -242,11 +255,17 @@ int main(int argc, char **argv)
                 continue;
             }
 
+            cv::Mat img = cv_ptr->image;
+            if(imageScale != 1.f)
+            {
+                cv::resize(img, img, cv::Size(), imageScale, imageScale, cv::INTER_LINEAR);
+            }
+
             if (msg->topic_name == "/zedx/left/image_rect") {
-                imLeft = cv_ptr->image.clone();
+                imLeft = img.clone();
                 tLeft = t;
             } else {
-                imRight = cv_ptr->image.clone();
+                imRight = img.clone();
                 tRight = t;
             }
 
@@ -349,13 +368,21 @@ int main(int argc, char **argv)
                         }
                     }
 
+                    // Matched features, split the same way the frame viewer
+                    // colours them: Map = green (points already in the map),
+                    // VO = blue (temporal points from the last frame).
+                    int nTrackedMap = 0, nTrackedVO = 0;
+                    SLAM.GetTrackedFeatureCounts(nTrackedMap, nTrackedVO);
+
                     const bool is_realtime = (slam_ms < 100.0);
                     std::cout << std::fixed << std::setprecision(1)
                               << "Frame " << ni << ": "
                               << (is_realtime ? "REAL-TIME" : "DELAYED  ")
                               << "  SLAM: " << std::setw(6) << slam_ms << "ms"
                               << "  Full: " << std::setw(6) << full_ms << "ms"
-                              << "  IMU: "  << num_imu << "\n";
+                              << "  IMU: "  << num_imu
+                              << "  Map: "  << std::setw(4) << nTrackedMap
+                              << "  VO: "   << std::setw(4) << nTrackedVO << "\n";
 
                     imLeft.release();
                     imRight.release();

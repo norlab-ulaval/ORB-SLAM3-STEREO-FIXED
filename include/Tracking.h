@@ -213,6 +213,19 @@ protected:
 
     bool Relocalization();
 
+    // Relocalize by seeding the pose from the map instead of querying the
+    // keyframe database by appearance. Used for the first fix of a
+    // localization session, when we already know roughly where we start.
+    bool RelocalizationFromPrior();
+
+    // Track against the previous frame by projection when no motion model is
+    // available yet (e.g. the frame right after a relocalization). Bridges to
+    // TrackWithMotionModel() without falling back to bag-of-words matching.
+    bool TrackFromLastFramePrior();
+
+    // True while the IMU indicates the platform is not moving.
+    bool IsStationaryFromIMU();
+
     void UpdateLocalMap();
     void UpdateLocalPoints();
     void UpdateLocalKeyFrames();
@@ -319,6 +332,19 @@ protected:
     KeyFrame* mpLastKeyFrame;
     unsigned int mnLastKeyFrameId;
     unsigned int mnLastRelocFrameId;
+
+    // Pose-prior relocalization (first fix of a localization session)
+    bool mbPriorReloc;
+    bool mbPriorRelocDone;
+    int mnPriorRelocMinInliers;
+
+    // Zero-motion clamp: hold the pose until the IMU first reports motion.
+    // Latches once excited -- an accelerometer cannot tell rest from constant
+    // velocity, so the test is only valid before the platform starts moving.
+    bool mbZeroMotionClamp;
+    bool mbImuExcitedOnce;
+    float mfStationaryGyroTh;
+    float mfStationaryAccTh;
     double mTimeStampLost;
     double time_recently_lost;
 

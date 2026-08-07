@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c ' *)",
+      "Read(//tmp/**)",
+      "Bash(apt list *)",
+      "Bash(sudo -n apt-get install -y gdb)",
+      "Bash(cd /workspaces/ORB-SLAM3-STEREO-FIXED/build && find . -iname \"*stereo_inertial_fomo_ros*\" 2>/dev/null; grep -rn \"stereo_inertial_fomo_ros\" ../Examples/Stereo-Inertial/CMakeLists.txt 2>/dev/null)",
+      "Bash(nohup ./build.sh)",
+      "Bash(echo \"started pid $!\")",
+      "Bash(nohup /workspaces/ORB-SLAM3-STEREO-FIXED/build.sh > /tmp/build_profiling.log 2>&1 & *)",
+      "Bash(nohup ./run_ros.sh)",
+      "Bash(grep -A 60 \"TIME STATS\\\\|Tracking$\")",
+      "Bash(./configure.py --load-atlas \"/workspaces/ORB-SLAM3-STEREO-FIXED/data/orange_2025-06-26-10-48/atlas\")",
+      "Bash(./configure.py --save-atlas \"/tmp/test_atlas\" --load-atlas \"\")",
+      "Bash(nohup /workspaces/ORB-SLAM3-STEREO-FIXED/build.sh)",
+      "Bash(nproc; echo *)",
+      "Bash(awk 'NR>=1200 && NR<=1345 && /^bool Tracking::|^void Tracking::/' /workspaces/ORB-SLAM3-STEREO-FIXED/src/Tracking.cc)"
+    ]
+  }
+}

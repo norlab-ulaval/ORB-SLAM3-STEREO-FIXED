@@ -1,8 +1,10 @@
-FROM osrf/ros:humble-desktop
+FROM ros:humble
 
 # Install additional packages
 RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
     && apt-get -y install --no-install-recommends \
+    ros-humble-desktop \
+    ros-humble-rosbag2-storage-mcap \
     cmake \
     build-essential \
     libopencv-dev \
@@ -35,22 +37,22 @@ RUN git clone --recursive https://github.com/stevenlovegrove/Pangolin.git && \
     make install
 
 WORKDIR /opt
-RUN git clone https://github.com/norlab-ulaval/ORB-SLAM3-STEREO-FIXED.git -b offline orbslam3 && \
-    cd orbslam3 && \
-    git submodule update --init --recursive && \
-    chmod +x build.sh && \
-    ./build.sh
+# RUN git clone https://github.com/norlab-ulaval/ORB-SLAM3-STEREO-FIXED.git -b offline orbslam3 && \
+#     cd orbslam3 && \
+#     git submodule update --init --recursive && \
+#     chmod +x build.sh && \
+#     ./build.sh
 
-RUN cd /opt/orbslam3 && \
-    wget https://github.com/norlab-ulaval/ORB_SLAM3_ROS2/raw/main/vocabulary/ORBvoc.txt.tar.gz && \
-    tar -xvf ORBvoc.txt.tar.gz && \
-    rm ORBvoc.txt.tar.gz
+# RUN cd /opt/orbslam3 && \
+#     wget https://github.com/norlab-ulaval/ORB_SLAM3_ROS2/raw/main/vocabulary/ORBvoc.txt.tar.gz && \
+#     tar -xvf ORBvoc.txt.tar.gz && \
+#     rm ORBvoc.txt.tar.gz
 
 RUN mkdir /output
 RUN mkdir /dataset
 
 # install /opt/orbslam3/run.sh systsem-wide
-RUN cp /opt/orbslam3/run.sh /usr/local/bin/run_orbslam3
+# RUN cp /opt/orbslam3/run.sh /usr/local/bin/run_orbslam3
 
 ENV DATASET_PATH=/dataset
 ENV OUTPUT_PATH=/output
