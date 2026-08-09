@@ -1783,6 +1783,20 @@ bool Tracking::PredictStateIMU()
         return false;
     }
 
+    // PreintegrateIMU() leaves the preintegration null whenever it returns early -- most
+    // easily by the IMU stream having a gap longer than one frame period, which starves
+    // mlQueueImuData.  Bail out here rather than dereferencing it below.
+    if(mbMapUpdated && mpLastKeyFrame && !mpImuPreintegratedFromLastKF)
+    {
+        Verbose::PrintMess("No IMU preintegration from last KF", Verbose::VERBOSITY_NORMAL);
+        return false;
+    }
+    if(!mbMapUpdated && !mCurrentFrame.mpImuPreintegratedFrame)
+    {
+        Verbose::PrintMess("No IMU preintegration for this frame", Verbose::VERBOSITY_NORMAL);
+        return false;
+    }
+
     if(mbMapUpdated && mpLastKeyFrame)
     {
         const Eigen::Vector3f twb1 = mpLastKeyFrame->GetImuPosition();
@@ -2048,7 +2062,7 @@ void Tracking::Track()
                     if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD))
                     {
                         if(pCurrentMap->isImuInitialized())
-                            PredictStateIMU();
+                            bOK = PredictStateIMU();
                         else
                             bOK = false;
 
@@ -2962,14 +2976,14 @@ bool Tracking::TrackWithMotionModel()
 
     if (mpAtlas->isImuInitialized() && (mCurrentFrame.mnId>mnLastRelocFrameId+mnFramesToResetIMU))
     {
-        // Predict state with IMU if it is initialized and it doesnt need reset
-        PredictStateIMU();
-        return true;
+        // Predict state with IMU if it is initialized and it doesnt need reset.  When
+        // there is no preintegration for this frame (a gap in the IMU stream) fall
+        // through to the constant-velocity model instead.
+        if(PredictStateIMU())
+            return true;
     }
-    else
-    {
-        mCurrentFrame.SetPose(mVelocity * mLastFrame.GetPose());
-    }
+
+    mCurrentFrame.SetPose(mVelocity * mLastFrame.GetPose());
 
 
 

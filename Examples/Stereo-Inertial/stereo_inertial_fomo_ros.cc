@@ -6,6 +6,7 @@
 
 #include <iostream>
 #include <algorithm>
+#include <csignal>
 #include <fstream>
 #include <iomanip>
 #include <chrono>
@@ -30,7 +31,7 @@
 #include <rosbag2_storage/storage_filter.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/imu.hpp>
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 
 using namespace std;
 
@@ -40,10 +41,10 @@ struct TrajectoryPoint {
     Eigen::Quaternionf q;
 };
 
-// Subtract `offset` from the first (whitespace-separated) token on every non-empty line
-// of `path`.  `scale` converts the offset from seconds to whatever unit the file uses
-// (1.0 for TUM/seconds, 1e9 for EuRoC/nanoseconds).
-void CorrectTimestamps(const string &path, double offset, double scale = 1.0)
+// Subtract `offset` seconds from the first (whitespace-separated) token on every
+// non-empty line of `path`.  Every file we write is TUM format, so timestamps are
+// already in seconds and no unit conversion is needed.
+void CorrectTimestamps(const string &path, double offset)
 {
     ifstream fin(path);
     if(!fin.is_open()) { cerr << "CorrectTimestamps: cannot open " << path << endl; return; }
@@ -57,15 +58,100 @@ void CorrectTimestamps(const string &path, double offset, double scale = 1.0)
         if(!(iss >> ts)) { buf << line << "\n"; continue; } // pass comment/header lines through
         string rest;
         getline(iss, rest);
-        buf << fixed << setprecision(6) << (ts - offset * scale) << rest << "\n";
+        buf << fixed << setprecision(6) << (ts - offset) << rest << "\n";
     }
     fin.close();
     ofstream fout(path, ios::trunc);
     fout << buf.str();
 }
 
+// Drop a trailing extension from the user-supplied output base name so the suffixed
+// outputs come out as <base><suffix>.txt rather than <base>.txt<suffix>.txt.
+static string StripExtension(const string &path)
+{
+    size_t slash = path.find_last_of("/\\");
+    size_t dot   = path.find_last_of('.');
+    if(dot != string::npos && (slash == string::npos || dot > slash + 1))
+        return path.substr(0, dot);
+    return path;
+}
+
+// One pose as a TUM-format line: timestamp tx ty tz qx qy qz qw.  Shared by the
+// final trajectory files and the live file so the two can never drift apart.
+static void WriteTumPoint(ostream &f, const TrajectoryPoint &pt)
+{
+    f << fixed
+      << setprecision(6) << pt.t << " "
+      << setprecision(9) << pt.twb(0) << " " << pt.twb(1) << " " << pt.twb(2) << " "
+      << pt.q.x() << " " << pt.q.y() << " " << pt.q.z() << " " << pt.q.w() << "\n";
+}
+
+// Write `points` to `path` in TUM format.
+static void WriteTumTrajectory(const string &path, const vector<TrajectoryPoint> &points)
+{
+    ofstream f(path);
+    for(const auto &pt : points)
+        WriteTumPoint(f, pt);
+}
+
+// Rewrite the longest/first/full trajectory files from the segments collected so far.
+// `segments` is taken by value so the periodic checkpoint can fold in the still-open
+// `current` segment without disturbing the read loop's state.
+static void ExportTrajectories(const string &strOutName,
+                               vector<vector<TrajectoryPoint>> segments,
+                               const vector<TrajectoryPoint> &current,
+                               bool verbose)
+{
+    if(!current.empty())
+        segments.push_back(current);
+
+    size_t max_len = 0;
+    int max_idx = -1;
+    for (size_t i = 0; i < segments.size(); ++i) {
+        if (segments[i].size() > max_len) {
+            max_len = segments[i].size();
+            max_idx = static_cast<int>(i);
+        }
+    }
+    vector<TrajectoryPoint> longest_segment;
+    if (max_idx >= 0)
+        longest_segment = segments[max_idx];
+    WriteTumTrajectory(strOutName + "_trajectory_longest.txt", longest_segment);
+
+    vector<TrajectoryPoint> first_segment;
+    if (!segments.empty())
+        first_segment = segments[0];
+    WriteTumTrajectory(strOutName + "_trajectory_first.txt", first_segment);
+
+    // Every tracked segment concatenated in chronological order.  Segments are only
+    // split by short tracking dropouts, across which the pose is usually continuous,
+    // so this is the closest thing to the trajectory actually flown.  There is a gap
+    // in time (and possibly a small jump in pose) at each segment boundary.
+    vector<TrajectoryPoint> full_trajectory;
+    for (const auto& seg : segments)
+        full_trajectory.insert(full_trajectory.end(), seg.begin(), seg.end());
+    WriteTumTrajectory(strOutName + "_trajectory_full.txt", full_trajectory);
+
+    if(verbose)
+        cout << "Trajectory segments: " << segments.size()
+             << " (full: " << full_trajectory.size() << " poses, longest: "
+             << longest_segment.size() << ", first: " << first_segment.size() << ")" << endl;
+}
+
+// Set by SIGINT/SIGTERM/SIGHUP so the read loop can break out and still save.  Only
+// ever assigned from the handler, which keeps it async-signal-safe.
+static volatile sig_atomic_t g_stop = 0;
+static void RequestStop(int) { g_stop = 1; }
+
 int main(int argc, char **argv)
 {
+    // A run is 20+ minutes of work that previously existed only in RAM until the very
+    // end.  Catch the polite signals so a Ctrl-C or a session teardown exits through
+    // the normal save path instead of discarding everything.
+    std::signal(SIGINT,  RequestStop);
+    std::signal(SIGTERM, RequestStop);
+    std::signal(SIGHUP,  RequestStop);
+
     if(argc < 5)
     {
         cerr << endl << "Usage: ./stereo_inertial_fomo_ros path_to_vocabulary path_to_settings path_to_rosbag output_trajectory_path [time_offset_seconds] [--realtime] [--no-imu]" << endl;
@@ -88,10 +174,10 @@ int main(int argc, char **argv)
     }
 
     string pathBag(argv[3]);
-    string strOutName(argv[4]);
+    string strOutName = StripExtension(argv[4]);
 
     cout << "Opening rosbag: " << pathBag << endl;
-    
+
     rosbag2_cpp::Reader reader;
     rosbag2_storage::StorageOptions storage_options;
     storage_options.uri = pathBag;
@@ -121,7 +207,7 @@ int main(int argc, char **argv)
 
     // Create SLAM system first so we can read the atlas timestamps before deciding the offset.
     ORB_SLAM3::System::eSensor sensorType = bUseImu ? ORB_SLAM3::System::IMU_STEREO : ORB_SLAM3::System::STEREO;
-    ORB_SLAM3::System SLAM(argv[1],argv[2],sensorType, true); // last param is visualization
+    ORB_SLAM3::System SLAM(argv[1],argv[2],sensorType, false); // last param is visualization
 
     const double kAtlasMarginSec = 5.0; // seconds before the first atlas KF
     double time_offset = 0.0;
@@ -148,8 +234,18 @@ int main(int argc, char **argv)
     if(imageScale != 1.f)
         cout << "Resizing input images by a factor of " << imageScale << endl;
 
-    std::ofstream odomFile(strOutName + "_bak");
-    odomFile << fixed;
+    // The map-derived trajectories only describe a map we just built; in localization
+    // mode they would just echo the preloaded atlas back, so skip them there.
+    // System keeps this flag private and clears it once consumed, so read the setting
+    // ourselves the same way System.cc does.
+    bool bLocalizationMode = false;
+    {
+        cv::FileNode node = fSettings["System.LocalizationMode"];
+        if(!node.empty())
+            bLocalizationMode = static_cast<int>(node) != 0;
+    }
+    if(bLocalizationMode)
+        cout << "Localization mode: map/keyframe trajectories will not be written." << endl;
 
     cout << endl << "-------" << endl;
     cout << "Start processing rosbag sequence ..." << endl;
@@ -171,6 +267,14 @@ int main(int argc, char **argv)
     std::vector<std::vector<TrajectoryPoint>> trajectory_segments;
     std::vector<TrajectoryPoint> current_segment;
 
+    // Poses are otherwise only written once the whole bag has been read, so a crash at
+    // 98% loses everything.  Mirror every pose into a live file, flushed per frame, and
+    // re-export the normal files every kCheckpointFrames.  Timestamps here are raw: the
+    // offset reported as "Applying time offset" is only removed from the final files by
+    // CorrectTimestamps, so subtract it by hand if you ever recover from the live file.
+    const int kCheckpointFrames = 500;
+    ofstream liveTraj(strOutName + "_trajectory_live.txt");
+
     struct TimingLog {
         int    frame;
         double slam_ms;  // TrackStereo wall time
@@ -183,17 +287,33 @@ int main(int argc, char **argv)
     int  frames_dropped   = 0;
     int  ni               = 0;
 
-    while (reader.has_next()) {
-        auto msg = reader.read_next();
+    while (true) {
+        if (g_stop) {
+            cerr << "\nStop requested at frame " << ni << " - saving what we have." << endl;
+            break;
+        }
+
+        // A truncated or corrupt bag throws out of the reader; that used to escape main
+        // and discard the whole run, so fall through to the save path instead.
+        decltype(reader.read_next()) msg;
+        try {
+            if (!reader.has_next()) break;
+            msg = reader.read_next();
+        } catch (const std::exception& e) {
+            cerr << "Bag read failed at frame " << ni << ": " << e.what()
+                 << " - saving what we have." << endl;
+            break;
+        }
+
         rclcpp::SerializedMessage serialized_msg(*msg->serialized_data);
 
         if (msg->topic_name == "/vectornav/data_raw") {
             sensor_msgs::msg::Imu imu_msg;
             imu_serialization.deserialize_message(&serialized_msg, &imu_msg);
-            
+
             double t = imu_msg.header.stamp.sec + imu_msg.header.stamp.nanosec * 1e-9;
             if (time_offset_computed) t += time_offset;
-            
+
             vImuMeas.push_back(ORB_SLAM3::IMU::Point(
                 imu_msg.linear_acceleration.x, imu_msg.linear_acceleration.y, imu_msg.linear_acceleration.z,
                 imu_msg.angular_velocity.x, imu_msg.angular_velocity.y, imu_msg.angular_velocity.z,
@@ -202,12 +322,12 @@ int main(int argc, char **argv)
         } else if (msg->topic_name == "/zedx/left/image_rect" || msg->topic_name == "/zedx/right/image_rect") {
             sensor_msgs::msg::Image img_msg;
             image_serialization.deserialize_message(&serialized_msg, &img_msg);
-            
+
             double t = img_msg.header.stamp.sec + img_msg.header.stamp.nanosec * 1e-9;
 
             if (!time_offset_computed) {
                 first_cam_ts = t;
-                
+
                 ORB_SLAM3::Atlas* pAtlas = SLAM.GetAtlas();
                 double atlas_min_ts = std::numeric_limits<double>::max();
                 if(pAtlas) {
@@ -237,9 +357,9 @@ int main(int argc, char **argv)
                     time_offset = stod(sTimeOffset);
                     cout << "No atlas loaded. Applying CLI time offset: " << time_offset << " s" << endl;
                 }
-                
+
                 time_offset_computed = true;
-                
+
                 for (auto& imu : vImuMeas) {
                     imu.t += time_offset;
                 }
@@ -305,6 +425,14 @@ int main(int argc, char **argv)
 
                     auto t_slam_start = std::chrono::steady_clock::now();
                     size_t num_imu = vImuMeas.size();
+
+                    // A gap in the IMU stream leaves the frame with no preintegration,
+                    // which Tracking then has to fall back from.  Say so: the library
+                    // reports it only through Verbose, which System sets to QUIET.
+                    if(bUseImu && vImuMeas.empty())
+                        cerr << "IMU starvation: no IMU measurements for frame " << ni
+                             << " (t=" << fixed << setprecision(6) << tframe << ")" << endl;
+
                     Sophus::SE3f Tcw;
                     if (bUseImu) {
                         Tcw = SLAM.TrackStereo(imLeft, imRight, tframe, vImuMeas);
@@ -323,6 +451,7 @@ int main(int argc, char **argv)
                         if (tLost >= 0 && !current_segment.empty()) {
                             trajectory_segments.push_back(current_segment);
                             current_segment.clear();
+                            liveTraj << "# segment\n";
                         }
                         if (!bHasLocalized) {
                             bHasLocalized = true;
@@ -332,13 +461,15 @@ int main(int argc, char **argv)
                                 rt_wall_start = std::chrono::steady_clock::now();
                             }
                         }
-                        tLost = -1.0; 
+                        tLost = -1.0;
                         Sophus::SE3f Twb = (Tbc * Tcw).inverse();
                         TrajectoryPoint pt;
                         pt.t = tframe;
                         pt.twb = Twb.translation();
                         pt.q = Twb.unit_quaternion();
                         current_segment.push_back(pt);
+                        WriteTumPoint(liveTraj, pt);
+                        liveTraj.flush();
                     }
                     else if(trackingState == 4 && bHasLocalized) // LOST
                     {
@@ -347,6 +478,7 @@ int main(int argc, char **argv)
                             if (!current_segment.empty()) {
                                 trajectory_segments.push_back(current_segment);
                                 current_segment.clear();
+                                liveTraj << "# segment\n";
                             }
                             cerr << "Tracking lost (State: LOST) at frame " << ni << ". Will retry for 10 seconds..." << endl;
                         } else if (tframe - tLost > 10.0) {
@@ -387,6 +519,9 @@ int main(int argc, char **argv)
                     imLeft.release();
                     imRight.release();
                     ni++;
+
+                    if (ni % kCheckpointFrames == 0)
+                        ExportTrajectories(strOutName, trajectory_segments, current_segment, false);
                 } else {
                     // Frame drop/skip if desynchronized
                     if (tLeft < tRight) imLeft.release();
@@ -396,39 +531,8 @@ int main(int argc, char **argv)
         }
     }
 
-    if (!current_segment.empty()) {
-        trajectory_segments.push_back(current_segment);
-    }
-    
-    size_t max_len = 0;
-    int max_idx = -1;
-    for (size_t i = 0; i < trajectory_segments.size(); ++i) {
-        if (trajectory_segments[i].size() > max_len) {
-            max_len = trajectory_segments[i].size();
-            max_idx = i;
-        }
-    }
-
-    if (max_idx >= 0) {
-        for (const auto& pt : trajectory_segments[max_idx]) {
-            odomFile << setprecision(6) << pt.t << " "
-                     << setprecision(9) << pt.twb(0) << " " << pt.twb(1) << " " << pt.twb(2) << " "
-                     << pt.q.x() << " " << pt.q.y() << " " << pt.q.z() << " " << pt.q.w() << "\n";
-        }
-    }
-
-    odomFile.close();
-
-    std::ofstream firstOdomFile(strOutName + "_first_bak");
-    firstOdomFile << fixed;
-    if (!trajectory_segments.empty()) {
-        for (const auto& pt : trajectory_segments[0]) {
-            firstOdomFile << setprecision(6) << pt.t << " "
-                          << setprecision(9) << pt.twb(0) << " " << pt.twb(1) << " " << pt.twb(2) << " "
-                          << pt.q.x() << " " << pt.q.y() << " " << pt.q.z() << " " << pt.q.w() << "\n";
-        }
-    }
-    firstOdomFile.close();
+    liveTraj.flush();
+    ExportTrajectories(strOutName, trajectory_segments, current_segment, true);
 
     // --- Atlas integrity check & pointcloud export ---
     {
@@ -469,16 +573,23 @@ int main(int argc, char **argv)
 
     SLAM.Shutdown();
 
-    SLAM.SaveTrajectoryEuRoC(strOutName);
-    SLAM.SaveKeyFrameTrajectoryEuRoC(strOutName + "_kf");
+    if(!bLocalizationMode)
+    {
+        SLAM.SaveTrajectoryTUM(strOutName + "_map_frames.txt");
+        SLAM.SaveKeyFrameTrajectoryTUM(strOutName + "_map_keyframes.txt");
+    }
 
     if(time_offset != 0.0)
     {
         cout << "Correcting timestamps in output files (offset = " << time_offset << " s)..." << endl;
-        CorrectTimestamps(strOutName + "_bak", time_offset, 1.0);   
-        CorrectTimestamps(strOutName + "_first_bak", time_offset, 1.0);   
-        CorrectTimestamps(strOutName,           time_offset, 1e9);  
-        CorrectTimestamps(strOutName + "_kf",   time_offset, 1e9);  
+        CorrectTimestamps(strOutName + "_trajectory_longest.txt", time_offset);
+        CorrectTimestamps(strOutName + "_trajectory_first.txt",   time_offset);
+        CorrectTimestamps(strOutName + "_trajectory_full.txt",    time_offset);
+        if(!bLocalizationMode)
+        {
+            CorrectTimestamps(strOutName + "_map_frames.txt",    time_offset);
+            CorrectTimestamps(strOutName + "_map_keyframes.txt", time_offset);
+        }
         cout << "Timestamp correction done." << endl;
     }
 

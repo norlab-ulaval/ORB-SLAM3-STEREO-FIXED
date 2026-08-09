@@ -1,9 +1,9 @@
 %YAML:1.0
 
 Atlas: true
-System.LoadAtlasFromFile: "/workspaces/ORB-SLAM3-STEREO-FIXED/data/orange_2025-06-26-10-48/atlas"
+System.LoadAtlasFromFile: "/media/mabox/SSD_Matej/fomo-visual/2025-10-14/orange_2025-10-14-12-46/orange_2025-10-14-12-46/atlas"
 System.LocalizationMode: 1
-# System.SaveAtlasToFile: "/tmp/t"
+# System.SaveAtlasToFile: "/media/mabox/SSD_Matej/fomo-visual/2025-10-14/orange_2025-10-14-12-46/orange_2025-10-14-12-46/atlas"
 
 
 #--------------------------------------------------------------------------------------------
