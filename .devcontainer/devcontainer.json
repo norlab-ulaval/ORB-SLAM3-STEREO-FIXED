@@ -5,8 +5,9 @@
     "dockerfile": "Dockerfile"
     },
     "containerEnv": {
-        "DISPLAY": "host.docker.internal:0"
+        "DISPLAY": "192.168.0.118:1"
     },
+
     // "mounts": [
     //     "source=/Volumes/T7_Shield/fomo-visual,target=/data,type=bind"
     // ],

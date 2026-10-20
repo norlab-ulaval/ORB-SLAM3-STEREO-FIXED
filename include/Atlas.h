@@ -118,6 +118,9 @@ public:
     void SetMapBad(Map* pMap);
     void RemoveBadMaps();
 
+    // Keep only the map with the most keyframes.  Call after the worker threads have stopped.
+    void KeepOnlyLargestMap();
+
     bool isInertial();
     void SetInertialSensor();
     void SetImuInitialized();

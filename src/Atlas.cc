@@ -313,24 +313,80 @@ void Atlas::PreSave()
             return elem1->GetId() < elem2->GetId();
         }
     };
-    std::copy(mspMaps.begin(), mspMaps.end(), std::back_inserter(mvpBackupMaps));
-    sort(mvpBackupMaps.begin(), mvpBackupMaps.end(), compFunctor());
+    // mvpBackupMaps is what serialize() actually writes, so a map has to be kept out of it
+    // to be kept out of the file -- SetMapBad() only touches mspMaps.  An empty map that
+    // reaches the archive is serialized without Map::PreSave() ever running on it, which
+    // leaves mnBackupKFinitialID/mnBackupKFlowerID uninitialized and makes PostLoad index
+    // mpKeyFrameId with garbage.  So filter into the backup list instead of copying it all
+    // in and trying to retract afterwards.  Clearing first keeps repeated saves idempotent.
+    mvpBackupMaps.clear();
 
-    std::set<GeometricCamera*> spCams(mvpCameras.begin(), mvpCameras.end());
-    int i = 0;
-    for(Map* pMi : mvpBackupMaps)
+    std::vector<Map*> vpDiscarded;
+    for(Map* pMi : mspMaps)
     {
         if(!pMi || pMi->IsBad())
             continue;
 
-        if(pMi->GetAllKeyFrames().size() == 0) {
-            // Empty map, erase before of save it.
-            SetMapBad(pMi);
+        if(pMi->GetAllKeyFrames().empty())
+        {
+            // Empty map, erase before of save it.  Deferred: mspMaps is being iterated.
+            vpDiscarded.push_back(pMi);
             continue;
         }
+        mvpBackupMaps.push_back(pMi);
+    }
+    sort(mvpBackupMaps.begin(), mvpBackupMaps.end(), compFunctor());
+
+    for(Map* pMi : vpDiscarded)
+        SetMapBad(pMi);
+    RemoveBadMaps();
+
+    std::set<GeometricCamera*> spCams(mvpCameras.begin(), mvpCameras.end());
+    for(Map* pMi : mvpBackupMaps)
         pMi->PreSave(spCams);
+}
+
+// Drop every map but the one with the most keyframes, so a run that lost tracking (and so
+// forked a fresh map in the atlas) still saves a single, coherent map instead of several in
+// unrelated coordinate frames.  Only safe once the mapping/loop-closing threads have stopped.
+void Atlas::KeepOnlyLargestMap()
+{
+    unique_lock<mutex> lock(mMutexAtlas);
+
+    if(mspMaps.size() < 2)
+        return;
+
+    Map* pLargest = nullptr;
+    for(Map* pMi : mspMaps)
+    {
+        if(!pMi || pMi->IsBad())
+            continue;
+        if(!pLargest ||
+           pMi->KeyFramesInMap() > pLargest->KeyFramesInMap() ||
+           (pMi->KeyFramesInMap() == pLargest->KeyFramesInMap() && pMi->GetId() < pLargest->GetId()))
+            pLargest = pMi;
+    }
+
+    if(!pLargest || pLargest->KeyFramesInMap() == 0)
+        return;
+
+    std::vector<Map*> vpDiscarded;
+    for(Map* pMi : mspMaps)
+        if(pMi != pLargest)
+            vpDiscarded.push_back(pMi);
+
+    for(Map* pMi : vpDiscarded)
+    {
+        cout << "Discarding map " << pMi->GetId() << " (" << pMi->KeyFramesInMap() << " KFs); "
+             << "keeping map " << pLargest->GetId() << " (" << pLargest->KeyFramesInMap() << " KFs)" << endl;
+        SetMapBad(pMi);
     }
     RemoveBadMaps();
+
+    // Assigned directly rather than through ChangeMap(), which flips stored/in-use flags and
+    // expects a live system.  The current map matters because SaveTrajectoryTUM() and the
+    // callers' integrity checks read GetCurrentMap()/GetAllKeyFrames(), which are scoped to it.
+    mpCurrentMap = pLargest;
 }
 
 void Atlas::PostLoad()

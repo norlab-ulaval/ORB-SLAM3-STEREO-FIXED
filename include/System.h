@@ -272,6 +272,10 @@ private:
     string mStrLoadAtlasFromFile;
     string mStrSaveAtlasToFile;
 
+    // System.SaveOnlyLargestMap: prune the atlas to its biggest map before serializing, so a
+    // run that lost tracking mid-way still yields a single-map file.
+    bool mbSaveOnlyLargestMap = true;
+
     string mStrVocabularyFilePath;
 
     Settings* settings_;

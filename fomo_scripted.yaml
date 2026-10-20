@@ -1,9 +1,11 @@
 %YAML:1.0
 
 Atlas: true
-System.LoadAtlasFromFile: "/media/mabox/SSD_Matej/fomo-visual/2025-10-14/orange_2025-10-14-12-46/orange_2025-10-14-12-46/atlas"
-System.LocalizationMode: 1
-# System.SaveAtlasToFile: "/media/mabox/SSD_Matej/fomo-visual/2025-10-14/orange_2025-10-14-12-46/orange_2025-10-14-12-46/atlas"
+# System.LoadAtlasFromFile: "/workspaces/ORB-SLAM3-STEREO-FIXED/data/yellow_2025-10-14-14-48/yellow_2025-10-14-14-48/atlas"
+System.LocalizationMode: 0
+System.SaveAtlasToFile: "/workspaces/ORB-SLAM3-STEREO-FIXED/data/orange_2025-10-14-12-46/orange_2025-10-14-12-46/atlas"
+# Tracking loss forks a new map into the atlas; prune back to the biggest one before saving.
+System.SaveOnlyLargestMap: 1
 
 
 #--------------------------------------------------------------------------------------------

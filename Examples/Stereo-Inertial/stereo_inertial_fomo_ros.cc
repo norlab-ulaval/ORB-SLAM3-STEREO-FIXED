@@ -31,7 +31,7 @@
 #include <rosbag2_storage/storage_filter.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/imu.hpp>
-#include <cv_bridge/cv_bridge.hpp>
+#include <cv_bridge/cv_bridge.h>
 
 using namespace std;
 
@@ -207,7 +207,7 @@ int main(int argc, char **argv)
 
     // Create SLAM system first so we can read the atlas timestamps before deciding the offset.
     ORB_SLAM3::System::eSensor sensorType = bUseImu ? ORB_SLAM3::System::IMU_STEREO : ORB_SLAM3::System::STEREO;
-    ORB_SLAM3::System SLAM(argv[1],argv[2],sensorType, false); // last param is visualization
+    ORB_SLAM3::System SLAM(argv[1],argv[2],sensorType, true); // last param is visualization
 
     const double kAtlasMarginSec = 5.0; // seconds before the first atlas KF
     double time_offset = 0.0;
@@ -480,8 +480,14 @@ int main(int argc, char **argv)
                                 current_segment.clear();
                                 liveTraj << "# segment\n";
                             }
-                            cerr << "Tracking lost (State: LOST) at frame " << ni << ". Will retry for 10 seconds..." << endl;
-                        } else if (tframe - tLost > 10.0) {
+                            cerr << "Tracking lost (State: LOST) at frame " << ni
+                                 << (bLocalizationMode ? ". Will retry for 10 seconds..."
+                                                       : ". Continuing to map to the end of the bag.") << endl;
+                        } else if (bLocalizationMode && tframe - tLost > 10.0) {
+                            // Only bail out when localizing: there the run has nothing left to
+                            // contribute once it is lost.  While mapping, keep reading so the
+                            // atlas save at shutdown still happens -- tracking loss forks a new
+                            // map in the atlas, and Shutdown() prunes back to the largest one.
                             cerr << "Tracking lost for over 10 seconds. Stopping sequence to save trajectory..." << endl;
                             break;
                         }
@@ -534,6 +540,11 @@ int main(int argc, char **argv)
     liveTraj.flush();
     ExportTrajectories(strOutName, trajectory_segments, current_segment, true);
 
+    // Writes the atlas (after pruning it to its largest map).  Everything that reads the
+    // atlas must come after this: until the mapping/loop-closing/viewer threads are joined
+    // in here they are still mutating it, which corrupts the heap.
+    SLAM.Shutdown();
+
     // --- Atlas integrity check & pointcloud export ---
     {
         ORB_SLAM3::Atlas* atlas = SLAM.GetAtlas();
@@ -546,14 +557,15 @@ int main(int argc, char **argv)
             for(auto* pMP : allMP)
                 if(pMP && !pMP->isBad()) nGoodMP++;
 
+            // Runs after Shutdown(), so these are the counts as saved to the .osa.
             cout << "\n=== Atlas Integrity Check ===" << endl;
-            cout << "  Maps in atlas:       " << allMaps.size() << "  (expected: 1 for pure localization)" << endl;
-            cout << "  KFs in current map:  " << nKFs           << "  (expected: same as loaded atlas)"    << endl;
+            cout << "  Maps in atlas:       " << allMaps.size() << "  (expected: 1)" << endl;
+            cout << "  KFs in current map:  " << nKFs           << endl;
             cout << "  Good map points:     " << nGoodMP        << endl;
             if(allMaps.size() == 1)
-                cout << "  [PASS] Single map - localised against loaded atlas, no new map created." << endl;
+                cout << "  [PASS] Single map saved." << endl;
             else
-                cout << "  [FAIL] Multiple maps detected - new maps were created during the run." << endl;
+                cout << "  [FAIL] Multiple maps remain - pruning did not run (System.SaveOnlyLargestMap off?)." << endl;
             cout << "=============================" << endl;
 
             std::string filename = "pointcloud.csv";
@@ -570,8 +582,6 @@ int main(int argc, char **argv)
             cout << "Point cloud written to " << filename << " (" << nGoodMP << " points)" << endl;
         }
     }
-
-    SLAM.Shutdown();
 
     if(!bLocalizationMode)
     {

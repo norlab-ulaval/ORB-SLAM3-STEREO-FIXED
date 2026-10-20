@@ -99,6 +99,12 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         }
     }
 
+    node = fsSettings["System.SaveOnlyLargestMap"];
+    if(!node.empty())
+    {
+        mbSaveOnlyLargestMap = static_cast<int>(node) != 0;
+    }
+
     cout << "Atlas Load File: " << mStrLoadAtlasFromFile << endl;
     cout << "Atlas Save File: " << mStrSaveAtlasToFile << endl;
 
@@ -610,6 +616,11 @@ void System::Shutdown()
 
     if(!mStrSaveAtlasToFile.empty())
     {
+        // Safe here and not earlier: the threads above have been joined, so nothing else is
+        // walking the atlas while maps are removed from it.
+        if(mbSaveOnlyLargestMap)
+            mpAtlas->KeepOnlyLargestMap();
+
         cout << "Atlas saving to file " << mStrSaveAtlasToFile << endl;
         Verbose::PrintMess("Atlas saving to file " + mStrSaveAtlasToFile, Verbose::VERBOSITY_NORMAL);
         SaveAtlas(FileType::BINARY_FILE);
@@ -641,6 +652,14 @@ void System::SaveTrajectoryTUM(const string &filename)
 
     vector<KeyFrame*> vpKFs = mpAtlas->GetAllKeyFrames();
     sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
+
+    // A run that never produced a keyframe (or whose map was reset) leaves this empty; the
+    // Two lookup below would dereference vpKFs[0] and crash.
+    if(vpKFs.empty())
+    {
+        cerr << "WARNING: no keyframes in the current map, skipping " << filename << endl;
+        return;
+    }
 
     // Transform all keyframes so that the first keyframe is at the origin.
     // After a loop closure the first keyframe might not be at the origin.
